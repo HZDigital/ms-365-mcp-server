@@ -440,7 +440,10 @@
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/children",
     "method": "get",
     "toolName": "list-folder-files",
-    "scopes": ["Files.Read"]
+    "scopes": ["Files.Read"],
+    "allowedToolParams": ["driveId", "driveItemId", "top", "select", "orderby", "expand"],
+    "unsupportedQueryParams": ["$count", "$skip", "$search", "$filter"],
+    "llmTip": "Use this to list the immediate children of a folder. Prefer $top and $select. Do NOT send $count, $skip, $search, or $filter; follow @odata.nextLink for paging."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/content",
@@ -1147,62 +1150,80 @@
     "pathPattern": "/sites",
     "method": "get",
     "toolName": "search-sharepoint-sites",
-    "workScopes": ["Sites.Read.All"]
+    "workScopes": ["Sites.Read.All"],
+    "unsupportedQueryParams": ["$count"],
+    "allowedToolParams": ["top", "search", "select"],
+    "llmTip": "Use only $search, $top, and $select with this endpoint. Do NOT send $count, $skip, $orderby, $filter, or $expand; Microsoft Graph /sites discovery is inconsistent and rejects some of them."
   },
   {
     "pathPattern": "/sites/{site-id}",
     "method": "get",
     "toolName": "get-sharepoint-site",
-    "workScopes": ["Sites.Read.All"]
+    "workScopes": ["Sites.Read.All"],
+    "allowedToolParams": ["siteId", "select"]
   },
   {
     "pathPattern": "/sites/{site-id}/drives",
     "method": "get",
     "toolName": "list-sharepoint-site-drives",
-    "workScopes": ["Sites.Read.All"]
+    "workScopes": ["Sites.Read.All"],
+    "allowedToolParams": ["siteId", "top", "select", "orderby", "expand"],
+    "unsupportedQueryParams": ["$count", "$skip"],
+    "llmTip": "Use $top, $select, $orderby, and $expand only. Do NOT send $count or $skip; page using @odata.nextLink from Graph."
   },
   {
     "pathPattern": "/sites/{site-id}/drives/{drive-id}",
     "method": "get",
     "toolName": "get-sharepoint-site-drive-by-id",
-    "workScopes": ["Sites.Read.All"]
+    "workScopes": ["Sites.Read.All"],
+    "allowedToolParams": ["siteId", "driveId", "select", "expand"]
   },
   {
     "pathPattern": "/sites/{site-id}/items",
     "method": "get",
     "toolName": "list-sharepoint-site-items",
-    "workScopes": ["Sites.Read.All"]
+    "workScopes": ["Sites.Read.All"],
+    "allowedToolParams": ["siteId"],
+    "llmTip": "Avoid this endpoint for browsing. The site items collection can't be enumerated reliably; use list-sharepoint-site-drives or list-sharepoint-site-lists instead."
   },
   {
     "pathPattern": "/sites/{site-id}/items/{baseItem-id}",
     "method": "get",
     "toolName": "get-sharepoint-site-item",
-    "workScopes": ["Sites.Read.All"]
+    "workScopes": ["Sites.Read.All"],
+    "allowedToolParams": ["siteId", "baseItemId", "select", "expand"]
   },
   {
     "pathPattern": "/sites/{site-id}/lists",
     "method": "get",
     "toolName": "list-sharepoint-site-lists",
-    "workScopes": ["Sites.Read.All"]
+    "workScopes": ["Sites.Read.All"],
+    "allowedToolParams": ["siteId", "select"],
+    "unsupportedQueryParams": ["$count", "$skip", "$orderby", "$filter", "$expand", "$search"],
+    "llmTip": "Use $select when needed. To include hidden system lists, include system in $select. Do NOT send $count, $skip, $orderby, $filter, $expand, or $search."
   },
   {
     "pathPattern": "/sites/{site-id}/lists/{list-id}",
     "method": "get",
     "toolName": "get-sharepoint-site-list",
-    "workScopes": ["Sites.Read.All"]
+    "workScopes": ["Sites.Read.All"],
+    "allowedToolParams": ["siteId", "listId", "select", "expand"]
   },
   {
     "pathPattern": "/sites/{site-id}/lists/{list-id}/items",
     "method": "get",
     "toolName": "list-sharepoint-site-list-items",
     "workScopes": ["Sites.Read.All"],
-    "llmTip": "Add $expand=fields to include actual column values. Without it, only metadata is returned."
+    "allowedToolParams": ["siteId", "listId", "filter", "expand"],
+    "unsupportedQueryParams": ["$count", "$skip", "$orderby", "$search", "$select"],
+    "llmTip": "Use $expand=fields to include actual column values. This endpoint supports $filter and $expand. Do NOT send $count, $skip, $orderby, $search, or $select."
   },
   {
     "pathPattern": "/sites/{site-id}/lists/{list-id}/items/{listItem-id}",
     "method": "get",
     "toolName": "get-sharepoint-site-list-item",
     "workScopes": ["Sites.Read.All"],
+    "allowedToolParams": ["siteId", "listId", "listItemId", "expand"],
     "llmTip": "Add $expand=fields to include actual column values. Without it, only metadata is returned."
   },
   {
@@ -1230,13 +1251,16 @@
     "pathPattern": "/sites/{site-id}/getByPath(path='{path}')",
     "method": "get",
     "toolName": "get-sharepoint-site-by-path",
-    "workScopes": ["Sites.Read.All"]
+    "workScopes": ["Sites.Read.All"],
+    "allowedToolParams": ["siteId", "path"]
   },
   {
     "pathPattern": "/sites/delta()",
     "method": "get",
     "toolName": "get-sharepoint-sites-delta",
-    "workScopes": ["Sites.Read.All"]
+    "workScopes": ["Sites.Read.All"],
+    "allowedToolParams": [],
+    "llmTip": "Use this for delta discovery only. Do not add OData query parameters manually; follow the @odata.nextLink or deltaLink returned by Graph."
   },
   {
     "pathPattern": "/search/query",

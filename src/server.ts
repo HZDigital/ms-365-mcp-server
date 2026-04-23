@@ -47,6 +47,29 @@ function parseHttpOption(httpOption: string | boolean): { host: string | undefin
   return { host: undefined, port };
 }
 
+function parseCorsOrigins(rawValue: string | undefined): string[] {
+  return (rawValue || 'http://localhost:3000')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+function resolveCorsOrigin(requestOrigin: string | undefined, allowedOrigins: string[]): string | null {
+  if (allowedOrigins.includes('*')) {
+    return '*';
+  }
+
+  if (requestOrigin && allowedOrigins.includes(requestOrigin)) {
+    return requestOrigin;
+  }
+
+  if (!requestOrigin && allowedOrigins.length > 0) {
+    return allowedOrigins[0];
+  }
+
+  return null;
+}
+
 class MicrosoftGraphServer {
   private authManager: AuthManager;
   private options: CommandOptions;
@@ -180,9 +203,13 @@ class MicrosoftGraphServer {
       app.use(express.urlencoded({ extended: true }));
 
       // Add CORS headers for all routes
-      const corsOrigin = process.env.MS365_MCP_CORS_ORIGIN || 'http://localhost:3000';
+      const corsOrigins = parseCorsOrigins(process.env.MS365_MCP_CORS_ORIGIN);
       app.use((req, res, next) => {
-        res.header('Access-Control-Allow-Origin', corsOrigin);
+        const allowedOrigin = resolveCorsOrigin(req.get('Origin'), corsOrigins);
+        if (allowedOrigin) {
+          res.header('Access-Control-Allow-Origin', allowedOrigin);
+          res.header('Vary', 'Origin');
+        }
         res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
         res.header(
           'Access-Control-Allow-Headers',

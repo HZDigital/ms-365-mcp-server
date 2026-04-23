@@ -34,11 +34,42 @@ interface EndpointConfig {
   contentType?: string;
   acceptType?: string; // Custom Accept header for endpoints returning non-JSON content (e.g., text/vtt)
   readOnly?: boolean; // When true, allow this endpoint in read-only mode even if method is not GET
+  unsupportedQueryParams?: string[]; // Query params accepted by codegen/spec but rejected by the live Graph endpoint
+  allowedToolParams?: string[]; // Exact tool parameters to expose/accept for endpoints with flaky Graph query support
 }
 
 const endpointsData = JSON.parse(
   readFileSync(path.join(__dirname, 'endpoints.json'), 'utf8')
 ) as EndpointConfig[];
+
+function normalizeToolParamName(paramName: string): string {
+  return paramName.startsWith('$') ? paramName.slice(1).toLowerCase() : paramName.toLowerCase();
+}
+
+function isAllowedToolParam(config: EndpointConfig | undefined, paramName: string): boolean {
+  if (config?.allowedToolParams === undefined) {
+    return true;
+  }
+
+  const allowed = new Set(config.allowedToolParams.map((name) => normalizeToolParamName(name)));
+  return allowed.has(normalizeToolParamName(paramName));
+}
+
+function isSharePointSitesGetEndpoint(config: EndpointConfig | undefined, method: string): boolean {
+  return method.toUpperCase() === 'GET' && (config?.pathPattern?.startsWith('/sites') ?? false);
+}
+
+function isImplicitlyUnsupportedQueryParam(
+  config: EndpointConfig | undefined,
+  method: string,
+  paramName: string
+): boolean {
+  if (isSharePointSitesGetEndpoint(config, method) && normalizeToolParamName(paramName) === 'count') {
+    return true;
+  }
+
+  return false;
+}
 
 /** When set to a positive integer, caps Graph `$top` on list requests (see README). */
 function maxTopFromEnv(): number | undefined {
@@ -155,6 +186,11 @@ async function executeGraphTool(
     let body: unknown = null;
 
     for (const [paramName, paramValue] of Object.entries(params)) {
+      if (!isAllowedToolParam(config, paramName)) {
+        logger.info(`Ignoring disallowed parameter '${paramName}' for tool ${tool.alias}`);
+        continue;
+      }
+
       // Skip control parameters - not part of the Microsoft Graph API
       if (
         [
@@ -186,6 +222,9 @@ async function executeGraphTool(
       const normalizedParamName = paramName.startsWith('$') ? paramName.slice(1) : paramName;
       const isOdataParam = odataParams.includes(normalizedParamName.toLowerCase());
       const fixedParamName = isOdataParam ? `$${normalizedParamName.toLowerCase()}` : paramName;
+      const unsupportedQueryParams = new Set(
+        (config?.unsupportedQueryParams ?? []).map((name) => name.toLowerCase())
+      );
       // Convert kebab-case param names to camelCase for path param matching.
       // endpoints.json uses {message-id} but hack.ts extracts :messageId (camelCase) from the path.
       // LLMs may pass "message-id" (kebab) — we normalize so both forms work.
@@ -225,6 +264,15 @@ async function executeGraphTool(
 
           case 'Query':
             if (paramValue !== '' && paramValue != null) {
+              if (
+                unsupportedQueryParams.has(fixedParamName.toLowerCase()) ||
+                isImplicitlyUnsupportedQueryParam(config, tool.method, fixedParamName)
+              ) {
+                logger.info(
+                  `Ignoring unsupported query parameter '${fixedParamName}' for tool ${tool.alias}`
+                );
+                break;
+              }
               queryParams[fixedParamName] = `${paramValue}`;
             }
             break;
@@ -559,15 +607,25 @@ export function registerGraphTools(
       }
     }
 
+    if (endpointConfig?.allowedToolParams !== undefined) {
+      for (const key of Object.keys(paramSchema)) {
+        if (!isAllowedToolParam(endpointConfig, key)) {
+          delete paramSchema[key];
+        }
+      }
+    }
+
     if (tool.method.toUpperCase() === 'GET' && tool.path.includes('/')) {
-      paramSchema['fetchAllPages'] = z
-        .boolean()
-        .describe(
-          'Follow @odata.nextLink and merge up to 100 pages into one response. ' +
-            'Can return enormous payloads—only when the user explicitly needs a full export. ' +
-            'Prefer a small $top first, then paginate or narrow with $filter/$search.'
-        )
-        .optional();
+      if (isAllowedToolParam(endpointConfig, 'fetchAllPages')) {
+        paramSchema['fetchAllPages'] = z
+          .boolean()
+          .describe(
+            'Follow @odata.nextLink and merge up to 100 pages into one response. ' +
+              'Can return enormous payloads—only when the user explicitly needs a full export. ' +
+              'Prefer a small $top first, then paginate or narrow with $filter/$search.'
+          )
+          .optional();
+      }
     }
 
     // Override OData parameter descriptions with spec-gap guidance
@@ -621,12 +679,19 @@ export function registerGraphTools(
     }
     if (paramSchema['count'] !== undefined || paramSchema['$count'] !== undefined) {
       const countKey = paramSchema['$count'] !== undefined ? '$count' : 'count';
-      paramSchema[countKey] = z
-        .boolean()
-        .describe(
-          'Set true to enable advanced query mode (ConsistencyLevel: eventual). Required for complex $filter on flag/flagStatus or contains().'
-        )
-        .optional();
+      if (
+        endpointConfig?.unsupportedQueryParams?.some((param) => param.toLowerCase() === '$count') ||
+        isImplicitlyUnsupportedQueryParam(endpointConfig, tool.method, countKey)
+      ) {
+        delete paramSchema[countKey];
+      } else {
+        paramSchema[countKey] = z
+          .boolean()
+          .describe(
+            'Set true to enable advanced query mode (ConsistencyLevel: eventual). Required for complex $filter on flag/flagStatus or contains().'
+          )
+          .optional();
+      }
     }
 
     // Add account parameter for multi-account mode.
@@ -647,16 +712,20 @@ export function registerGraphTools(
     }
 
     // Add includeHeaders parameter for all tools to capture ETags and other headers
-    paramSchema['includeHeaders'] = z
-      .boolean()
-      .describe('Include response headers (including ETag) in the response metadata')
-      .optional();
+    if (isAllowedToolParam(endpointConfig, 'includeHeaders')) {
+      paramSchema['includeHeaders'] = z
+        .boolean()
+        .describe('Include response headers (including ETag) in the response metadata')
+        .optional();
+    }
 
     // Add excludeResponse parameter to only return success/failure indication
-    paramSchema['excludeResponse'] = z
-      .boolean()
-      .describe('Exclude the full response body and only return success or failure indication')
-      .optional();
+    if (isAllowedToolParam(endpointConfig, 'excludeResponse')) {
+      paramSchema['excludeResponse'] = z
+        .boolean()
+        .describe('Exclude the full response body and only return success or failure indication')
+        .optional();
+    }
 
     // Add timezone parameter for calendar endpoints that support it
     if (endpointConfig?.supportsTimezone) {

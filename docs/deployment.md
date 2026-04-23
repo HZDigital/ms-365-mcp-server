@@ -176,7 +176,7 @@ The client automatically discovers OAuth endpoints and opens a browser for authe
 - **Managed identity**: use managed identity for Key Vault access (no secrets in environment variables)
 - **Read-only mode**: use `--read-only` to disable all write operations (send, delete, update, create)
 - **Tool filtering**: use `--enabled-tools <regex>` or `--preset <names>` to restrict available tools
-- **CORS**: configure `MS365_MCP_CORS_ORIGIN` to restrict allowed origins (defaults to `http://localhost:3000`); set explicitly when clients run on a different origin
+- **CORS**: configure `MS365_MCP_CORS_ORIGIN` to restrict allowed origins (defaults to `http://localhost:3000`). You can provide a comma-separated allowlist such as `https://app.example.com,https://admin.example.com`; set explicitly when clients run on a different origin
 
 ## Exposed Endpoints
 
