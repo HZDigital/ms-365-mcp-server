@@ -1,4 +1,4 @@
-name: Trigger auto deployment for beka-ms-365-mcp
+name: Beka MCP
 
 # When this action will be executed
 on:

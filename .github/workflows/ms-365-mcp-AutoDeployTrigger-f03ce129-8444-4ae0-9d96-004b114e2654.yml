@@ -1,4 +1,4 @@
-name: Trigger auto deployment for ms-365-mcp
+name: H&Z MCP
 
 # When this action will be executed
 on:

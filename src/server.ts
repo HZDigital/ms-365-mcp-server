@@ -271,6 +271,7 @@ class MicrosoftGraphServer {
         helmet({
           contentSecurityPolicy: false,
           crossOriginEmbedderPolicy: false,
+          crossOriginOpenerPolicy: false,
           hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
         })
       );
