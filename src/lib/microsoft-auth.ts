@@ -195,12 +195,16 @@ export function toOAuthErrorResponse(error: unknown): {
   body: { error: string; error_description?: string; suberror?: string };
 } {
   if (error instanceof OAuthUpstreamError) {
+    const status =
+      Number.isInteger(error.status) && error.status >= 400 && error.status < 600
+        ? error.status
+        : 400;
     const body: { error: string; error_description?: string; suberror?: string } = {
       error: error.body.error,
     };
     if (error.body.error_description) body.error_description = error.body.error_description;
     if (error.body.suberror) body.suberror = error.body.suberror;
-    return { status: 400, body };
+    return { status, body };
   }
   return {
     status: 500,

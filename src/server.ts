@@ -373,7 +373,7 @@ class MicrosoftGraphServer {
         const metadata: Record<string, unknown> = {
           issuer: browserBase,
           authorization_endpoint: `${browserBase}/authorize`,
-          token_endpoint: `${browserBase}/token`,
+          token_endpoint: `${requestOrigin}/token`,
           response_types_supported: ['code'],
           response_modes_supported: ['query'],
           grant_types_supported: ['authorization_code', 'refresh_token'],
@@ -383,7 +383,7 @@ class MicrosoftGraphServer {
         };
 
         if (this.options.enableDynamicRegistration) {
-          metadata.registration_endpoint = `${browserBase}/register`;
+          metadata.registration_endpoint = `${requestOrigin}/register`;
         }
 
         res.json(metadata);
@@ -404,7 +404,7 @@ class MicrosoftGraphServer {
           : resolveAuthScopes(this.options);
 
         res.json({
-          resource: `${browserBase}/mcp`,
+          resource: `${requestOrigin}/mcp`,
           authorization_servers: [browserBase],
           scopes_supported: scopes,
           bearer_methods_supported: ['header'],
@@ -565,8 +565,9 @@ class MicrosoftGraphServer {
         //     admin has pre-consented every scope).
         const explicitAllowedScopes = parseAllowedScopes(this.options.allowedScopes);
         const clientScope = microsoftAuthUrl.searchParams.get('scope');
-        const baseScopes =
-          explicitAllowedScopes !== undefined
+        const baseScopes = this.options.obo
+          ? [`${clientId}/access_as_user`]
+          : explicitAllowedScopes !== undefined
             ? resolveAuthScopes(this.options)
             : clientScope
               ? clientScope.split(/\s+/).filter(Boolean)
@@ -575,7 +576,10 @@ class MicrosoftGraphServer {
                   this.options.enabledTools,
                   this.options.readOnly
                 );
-        const scopeSet = new Set([...baseScopes, 'User.Read', 'offline_access']);
+        const injectedScopes = this.options.obo
+          ? ['offline_access']
+          : ['User.Read', 'offline_access'];
+        const scopeSet = new Set([...baseScopes, ...injectedScopes]);
         microsoftAuthUrl.searchParams.set('scope', Array.from(scopeSet).join(' '));
 
         // Redirect to Microsoft's authorization page
