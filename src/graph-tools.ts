@@ -97,6 +97,19 @@ function isImplicitlyUnsupportedQueryParam(
   return false;
 }
 
+function isUnsupportedQueryParam(
+  config: EndpointConfig | undefined,
+  method: string,
+  paramName: string
+): boolean {
+  const normalizedParamName = normalizeToolParamName(paramName);
+  return (
+    (config?.unsupportedQueryParams ?? []).some(
+      (unsupported) => normalizeToolParamName(unsupported) === normalizedParamName
+    ) || isImplicitlyUnsupportedQueryParam(config, method, paramName)
+  );
+}
+
 /**
  * Delta tools where Graph does NOT support `$top`. The calendarView delta function
  * lists `$top` neither as supported nor among its rejected params; page size is
@@ -753,9 +766,6 @@ async function executeGraphTool(
       const normalizedParamName = paramName.startsWith('$') ? paramName.slice(1) : paramName;
       const isOdataParam = odataParams.includes(normalizedParamName.toLowerCase());
       const fixedParamName = isOdataParam ? `$${normalizedParamName.toLowerCase()}` : paramName;
-      const unsupportedQueryParams = new Set(
-        (config?.unsupportedQueryParams ?? []).map((name) => name.toLowerCase())
-      );
       // Convert kebab-case param names to camelCase for path param matching.
       // endpoints.json uses {message-id} but hack.ts extracts :messageId (camelCase) from the path.
       // LLMs may pass "message-id" (kebab) — we normalize so both forms work.
@@ -795,10 +805,7 @@ async function executeGraphTool(
 
           case 'Query':
             if (paramValue !== '' && paramValue != null) {
-              if (
-                unsupportedQueryParams.has(fixedParamName.toLowerCase()) ||
-                isImplicitlyUnsupportedQueryParam(config, tool.method, fixedParamName)
-              ) {
+              if (isUnsupportedQueryParam(config, tool.method, fixedParamName)) {
                 logger.info(
                   `Ignoring unsupported query parameter '${fixedParamName}' for tool ${tool.alias}`
                 );
@@ -855,6 +862,12 @@ async function executeGraphTool(
       } else if (isOdataParam) {
         // Fallback: OData param recognised by name but absent from generated client's parameter
         // list — forward it as a query param rather than silently dropping it.
+        if (isUnsupportedQueryParam(config, tool.method, fixedParamName)) {
+          logger.info(
+            `Ignoring unsupported query parameter '${fixedParamName}' for tool ${tool.alias}`
+          );
+          continue;
+        }
         queryParams[fixedParamName] = `${paramValue}`;
         logger.info(`OData param fallback: forwarded ${fixedParamName}=${paramValue}`);
       }
@@ -1226,6 +1239,12 @@ export function registerGraphTools(
       }
     }
 
+    for (const key of Object.keys(paramSchema)) {
+      if (isUnsupportedQueryParam(endpointConfig, tool.method, key)) {
+        delete paramSchema[key];
+      }
+    }
+
     if (tool.method.toUpperCase() === 'GET' && tool.path.includes('/') && paginationAllowed()) {
       if (isAllowedToolParam(endpointConfig, 'fetchAllPages')) {
         const maxPages = positiveIntFromEnv('MS365_MCP_MAX_PAGES', DEFAULT_MAX_PAGES);
@@ -1299,10 +1318,7 @@ export function registerGraphTools(
     }
     if (paramSchema['count'] !== undefined || paramSchema['$count'] !== undefined) {
       const countKey = paramSchema['$count'] !== undefined ? '$count' : 'count';
-      if (
-        endpointConfig?.unsupportedQueryParams?.some((param) => param.toLowerCase() === '$count') ||
-        isImplicitlyUnsupportedQueryParam(endpointConfig, tool.method, countKey)
-      ) {
+      if (isUnsupportedQueryParam(endpointConfig, tool.method, countKey)) {
         delete paramSchema[countKey];
       } else {
         paramSchema[countKey] = z

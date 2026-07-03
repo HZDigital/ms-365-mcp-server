@@ -550,7 +550,16 @@
     "toolName": "get-drive-delta",
     "presets": ["files", "onedrive", "personal"],
     "scopes": ["Files.Read"],
-    "llmTip": "Tracks changes to a driveItem and its children over time. Returns a collection of driveItems that have been created, modified, or deleted. Use get-drive-root-item first to get the root driveItem-id, then pass it here. Supports $select and delta tokens for incremental sync via @odata.deltaLink."
+    "allowedToolParams": [
+      "driveId",
+      "driveItemId",
+      "top",
+      "select",
+      "fetchAllPages",
+      "includeHeaders",
+      "excludeResponse"
+    ],
+    "llmTip": "Tracks changes to a driveItem and its children over time. Returns a collection of driveItems that have been created, modified, or deleted. Use get-drive-root-item first to get the root driveItem-id, then pass it here. Supports $top and $select on the initial request; for more pages follow @odata.nextLink. Do NOT send $count, $skip, $search, $filter, or $orderby."
   },
   {
     "pathPattern": "/drives/{drive-id}/root",
@@ -686,8 +695,17 @@
     "toolName": "search-onedrive-files",
     "presets": ["files", "onedrive", "personal", "search"],
     "scopes": ["Files.Read"],
+    "allowedToolParams": [
+      "driveId",
+      "q",
+      "top",
+      "select",
+      "fetchAllPages",
+      "includeHeaders",
+      "excludeResponse"
+    ],
     "skipEncoding": ["q"],
-    "llmTip": "Searches for files in a drive by name or content. The q parameter searches file names, metadata, and file content. Returns matching driveItems with id, name, webUrl, size, lastModifiedDateTime. Use list-drives first to get the drive-id."
+    "llmTip": "Searches for files in a drive by name or content. The q parameter searches file names, metadata, and file content. Returns matching driveItems with id, name, webUrl, size, lastModifiedDateTime. Use list-drives or list-sharepoint-site-drives first to get the drive-id. Do NOT send $count, $skip, $search, $filter, or $orderby; Graph drive search rejects client-made paging and only supports paging through @odata.nextLink."
   },
   {
     "pathPattern": "/drives/{drive-id}/items/{driveItem-id}/workbook/worksheets/{workbookWorksheet-id}/charts/add",
