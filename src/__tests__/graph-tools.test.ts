@@ -509,6 +509,41 @@ describe('graph-tools', () => {
       expect(schema['top'].description).toContain('Start small');
       expect(schema['top'].description).toContain('$select');
     });
+
+    it('should remove all configured unsupported query parameters from tool schemas', async () => {
+      const endpoint = makeEndpoint();
+      const config = makeConfig({ unsupportedQueryParams: ['$skip', '$search'] });
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [config];
+
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, createMockGraphClient() as any);
+
+      const schema = server.tools.get('test-tool')!.schema;
+      expect(schema['skip']).toBeUndefined();
+      expect(schema['search']).toBeUndefined();
+      expect(schema['filter']).toBeDefined();
+      expect(schema['count']).toBeDefined();
+    });
+
+    it('should ignore unsupported OData fallback parameters from stale clients', async () => {
+      const endpoint = makeEndpoint({ parameters: [] });
+      const config = makeConfig({ unsupportedQueryParams: ['$filter'] });
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [config];
+
+      const graphClient = createMockGraphClient();
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+
+      await server.tools.get('test-tool')!.handler({ filter: "subject eq 'x'" });
+
+      expect(graphClient.graphRequest).toHaveBeenCalledTimes(1);
+      const [url] = graphClient.graphRequest.mock.calls[0];
+      expect(url).not.toContain('$filter=');
+    });
   });
 
   describe('MS365_MCP_MAX_TOP', () => {

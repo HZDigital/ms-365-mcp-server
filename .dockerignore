@@ -6,6 +6,7 @@ CLAUDE.md
 .github
 .vscode
 *.log
+npm-debug.log*
 .DS_Store
 coverage
 .env
@@ -13,3 +14,4 @@ coverage
 .token-cache.json
 .selected-account.json
 .mcp.json
+Dockerfile*

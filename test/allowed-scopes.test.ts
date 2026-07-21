@@ -164,6 +164,25 @@ describe('allowed scope HTTP behavior', () => {
     expect(scopes).not.toContain('Calendars.Read');
   });
 
+  it('uses only the OBO app scope and offline access in authorize redirects', async () => {
+    process.env.MS365_MCP_CLIENT_SECRET = 'secret';
+    clearSecretsCache();
+    await startHttpServer({ allowedScopes: 'Mail.Read', obo: true });
+    const handler = expressMocks.routes.get('/authorize')!;
+    const res = mockResponse();
+
+    await handler(
+      mockRequest(
+        '/authorize?response_type=code&redirect_uri=http://localhost:6274/oauth/callback&scope=User.Read&state=abc'
+      ),
+      res
+    );
+
+    const redirectUrl = new URL(res.redirect.mock.calls[0][0]);
+    const scopes = redirectUrl.searchParams.get('scope')!.split(' ');
+    expect(scopes).toEqual(['test-client-id/access_as_user', 'offline_access']);
+  });
+
   it('keeps OBO protected-resource metadata ahead of allowed scopes', async () => {
     process.env.MS365_MCP_CLIENT_SECRET = 'secret';
     clearSecretsCache();
@@ -189,6 +208,41 @@ describe('allowed scope HTTP behavior', () => {
 
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({ scopes_supported: ['test-client-id/access_as_user'] })
+    );
+  });
+
+  it('keeps server-to-server metadata endpoints on the request origin when publicUrl is set', async () => {
+    await startHttpServer({
+      enableDynamicRegistration: true,
+      publicUrl: 'https://mcp.example.com',
+    });
+    const handler = expressMocks.routes.get('/.well-known/oauth-authorization-server')!;
+    const res = mockResponse();
+
+    await handler(mockRequest('/.well-known/oauth-authorization-server'), res);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        issuer: 'https://mcp.example.com',
+        authorization_endpoint: 'https://mcp.example.com/authorize',
+        token_endpoint: 'http://localhost:3000/token',
+        registration_endpoint: 'http://localhost:3000/register',
+      })
+    );
+  });
+
+  it('keeps protected-resource metadata resource on the request origin when publicUrl is set', async () => {
+    await startHttpServer({ publicUrl: 'https://mcp.example.com' });
+    const handler = expressMocks.routes.get('/.well-known/oauth-protected-resource')!;
+    const res = mockResponse();
+
+    await handler(mockRequest('/.well-known/oauth-protected-resource'), res);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resource: 'http://localhost:3000/mcp',
+        authorization_servers: ['https://mcp.example.com'],
+      })
     );
   });
 

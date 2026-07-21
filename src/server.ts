@@ -29,7 +29,6 @@ import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
 import { requestContext } from './request-context.js';
 import { dumpError } from './crash-logging.js';
-import crypto from 'node:crypto';
 import OboClient from './obo-client.js';
 
 /**
@@ -58,6 +57,32 @@ function parseHttpOption(httpOption: string | boolean): { host: string | undefin
   return { host: undefined, port };
 }
 
+function parseCorsOrigins(rawValue: string | undefined): string[] {
+  return (rawValue || 'http://localhost:3000')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+function resolveCorsOrigin(
+  requestOrigin: string | undefined,
+  allowedOrigins: string[]
+): string | null {
+  if (allowedOrigins.includes('*')) {
+    return '*';
+  }
+
+  if (requestOrigin && allowedOrigins.includes(requestOrigin)) {
+    return requestOrigin;
+  }
+
+  if (!requestOrigin && allowedOrigins.length > 0) {
+    return allowedOrigins[0];
+  }
+
+  return null;
+}
+
 class MicrosoftGraphServer {
   private authManager: AuthManager;
   private options: CommandOptions;
@@ -68,17 +93,6 @@ class MicrosoftGraphServer {
   private version: string = '0.0.0';
   private multiAccount: boolean = false;
   private accountNames: string[] = [];
-
-  // Two-leg PKCE: stores client's code_challenge and server's code_verifier, keyed by OAuth state
-  private pkceStore: Map<
-    string,
-    {
-      clientCodeChallenge: string;
-      clientCodeChallengeMethod: string;
-      serverCodeVerifier: string;
-      createdAt: number;
-    }
-  > = new Map();
 
   constructor(authManager: AuthManager, options: CommandOptions = {}) {
     this.authManager = authManager;
@@ -245,6 +259,7 @@ class MicrosoftGraphServer {
         helmet({
           contentSecurityPolicy: false,
           crossOriginEmbedderPolicy: false,
+          crossOriginOpenerPolicy: false,
           hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
         })
       );
@@ -253,9 +268,13 @@ class MicrosoftGraphServer {
       app.use(express.urlencoded({ extended: true }));
 
       // Add CORS headers for all routes
-      const corsOrigin = process.env.MS365_MCP_CORS_ORIGIN || 'http://localhost:3000';
+      const corsOrigins = parseCorsOrigins(process.env.MS365_MCP_CORS_ORIGIN);
       app.use((req, res, next) => {
-        res.header('Access-Control-Allow-Origin', corsOrigin);
+        const allowedOrigin = resolveCorsOrigin(req.get('Origin'), corsOrigins);
+        if (allowedOrigin) {
+          res.header('Access-Control-Allow-Origin', allowedOrigin);
+          res.header('Vary', 'Origin');
+        }
         res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
         res.header(
           'Access-Control-Allow-Headers',
@@ -343,7 +362,7 @@ class MicrosoftGraphServer {
         const metadata: Record<string, unknown> = {
           issuer: browserBase,
           authorization_endpoint: `${browserBase}/authorize`,
-          token_endpoint: `${browserBase}/token`,
+          token_endpoint: `${requestOrigin}/token`,
           response_types_supported: ['code'],
           response_modes_supported: ['query'],
           grant_types_supported: ['authorization_code', 'refresh_token'],
@@ -353,7 +372,7 @@ class MicrosoftGraphServer {
         };
 
         if (this.options.enableDynamicRegistration) {
-          metadata.registration_endpoint = `${browserBase}/register`;
+          metadata.registration_endpoint = `${requestOrigin}/register`;
         }
 
         res.json(metadata);
@@ -374,7 +393,7 @@ class MicrosoftGraphServer {
           : resolveAuthScopes(this.options);
 
         res.json({
-          resource: `${browserBase}/mcp`,
+          resource: `${requestOrigin}/mcp`,
           authorization_servers: [browserBase],
           scopes_supported: scopes,
           bearer_methods_supported: ['header'],
@@ -405,7 +424,7 @@ class MicrosoftGraphServer {
       }
 
       // Authorization endpoint - redirects to Microsoft
-      // Implements two-leg PKCE: client↔server and server↔Microsoft are independent
+      // Forwards PKCE statelessly so /authorize and /token can hit different replicas.
       app.get('/authorize', async (req, res) => {
         const url = new URL(req.url!, `${req.protocol}://${req.get('host')}`);
         const tenantId = this.secrets?.tenantId || 'common';
@@ -418,7 +437,6 @@ class MicrosoftGraphServer {
         // Extract client's PKCE parameters (from claude.ai or other MCP client)
         const clientCodeChallenge = url.searchParams.get('code_challenge');
         const clientCodeChallengeMethod = url.searchParams.get('code_challenge_method');
-        const state = url.searchParams.get('state');
 
         // Validate redirect_uri before forwarding to Microsoft to mitigate
         // CWE-601 (open redirect). Microsoft Entra performs its own redirect
@@ -444,8 +462,7 @@ class MicrosoftGraphServer {
           }
         }
 
-        // Forward parameters that Microsoft OAuth 2.0 v2.0 supports,
-        // but NOT code_challenge/code_challenge_method — we generate our own for Microsoft
+        // Forward parameters that Microsoft OAuth 2.0 v2.0 supports.
         const allowedParams = [
           'response_type',
           'redirect_uri',
@@ -464,57 +481,12 @@ class MicrosoftGraphServer {
           }
         });
 
-        // Two-leg PKCE: if the client sent a code_challenge, store it and generate
-        // a separate PKCE pair for the server↔Microsoft leg
-        if (clientCodeChallenge && state) {
-          const serverCodeVerifier = crypto.randomBytes(32).toString('base64url');
-          const serverCodeChallenge = crypto
-            .createHash('sha256')
-            .update(serverCodeVerifier)
-            .digest('base64url');
-
-          // Clean up expired entries before adding new ones
-          const now = Date.now();
-          const maxAge = 10 * 60 * 1000; // 10 minutes
-          const maxEntries = 1000;
-          for (const [key, value] of this.pkceStore) {
-            if (now - value.createdAt > maxAge) {
-              this.pkceStore.delete(key);
-            }
-          }
-
-          // Reject if store is still at capacity after cleanup (prevents memory exhaustion)
-          if (this.pkceStore.size >= maxEntries) {
-            logger.warn(
-              `PKCE store at capacity (${maxEntries} entries) — rejecting new authorization request`
-            );
-            res.status(503).json({
-              error: 'server_busy',
-              error_description: 'Too many pending authorization requests. Try again later.',
-            });
-            return;
-          }
-
-          this.pkceStore.set(state, {
-            clientCodeChallenge,
-            clientCodeChallengeMethod: clientCodeChallengeMethod || 'S256',
-            serverCodeVerifier,
-            createdAt: Date.now(),
-          });
-
-          // Send our server-generated code_challenge to Microsoft
-          microsoftAuthUrl.searchParams.set('code_challenge', serverCodeChallenge);
-          microsoftAuthUrl.searchParams.set('code_challenge_method', 'S256');
-
-          logger.info('Two-leg PKCE: stored client challenge, generated server challenge', {
-            state: state.substring(0, 8) + '...',
-          });
-        } else if (clientCodeChallenge) {
-          // No state to key on — fall back to forwarding directly (Claude Code path)
+        if (clientCodeChallenge) {
           microsoftAuthUrl.searchParams.set('code_challenge', clientCodeChallenge);
-          if (clientCodeChallengeMethod) {
-            microsoftAuthUrl.searchParams.set('code_challenge_method', clientCodeChallengeMethod);
-          }
+          microsoftAuthUrl.searchParams.set(
+            'code_challenge_method',
+            clientCodeChallengeMethod || 'S256'
+          );
         }
 
         // Use our Microsoft app's client_id
@@ -535,8 +507,9 @@ class MicrosoftGraphServer {
         //     admin has pre-consented every scope).
         const explicitAllowedScopes = parseAllowedScopes(this.options.allowedScopes);
         const clientScope = microsoftAuthUrl.searchParams.get('scope');
-        const baseScopes =
-          explicitAllowedScopes !== undefined
+        const baseScopes = this.options.obo
+          ? [`${clientId}/access_as_user`]
+          : explicitAllowedScopes !== undefined
             ? resolveAuthScopes(this.options)
             : clientScope
               ? clientScope.split(/\s+/).filter(Boolean)
@@ -545,7 +518,10 @@ class MicrosoftGraphServer {
                   this.options.enabledTools,
                   this.options.readOnly
                 );
-        const scopeSet = new Set([...baseScopes, 'User.Read', 'offline_access']);
+        const injectedScopes = this.options.obo
+          ? ['offline_access']
+          : ['User.Read', 'offline_access'];
+        const scopeSet = new Set([...baseScopes, ...injectedScopes]);
         microsoftAuthUrl.searchParams.set('scope', Array.from(scopeSet).join(' '));
 
         // Redirect to Microsoft's authorization page
@@ -598,40 +574,13 @@ class MicrosoftGraphServer {
               hasClientSecret: !!clientSecret,
             });
 
-            // Two-leg PKCE: check if we have a stored PKCE mapping for this exchange
-            // We need to find the matching state — it's not sent in the token request,
-            // but the code is unique per authorization, so we verify the client's
-            // code_verifier against all stored challenges and use the server's verifier
-            let serverCodeVerifier: string | undefined;
-
-            if (body.code_verifier) {
-              // Look through pkceStore for a matching client code_challenge
-              const clientVerifier = body.code_verifier as string;
-              const clientChallengeComputed = crypto
-                .createHash('sha256')
-                .update(clientVerifier)
-                .digest('base64url');
-
-              for (const [state, pkceData] of this.pkceStore) {
-                if (pkceData.clientCodeChallenge === clientChallengeComputed) {
-                  // Client's code_verifier matches stored code_challenge — two-leg PKCE
-                  serverCodeVerifier = pkceData.serverCodeVerifier;
-                  this.pkceStore.delete(state);
-                  logger.info('Two-leg PKCE: matched client verifier, using server verifier', {
-                    state: state.substring(0, 8) + '...',
-                  });
-                  break;
-                }
-              }
-            }
-
             const result = await exchangeCodeForToken(
               body.code as string,
               body.redirect_uri as string,
               clientId,
               clientSecret,
               tenantId,
-              serverCodeVerifier || (body.code_verifier as string | undefined),
+              body.code_verifier as string | undefined,
               this.secrets!.cloudType
             );
             res.json(result);

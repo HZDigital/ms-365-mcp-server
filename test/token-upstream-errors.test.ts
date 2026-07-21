@@ -117,8 +117,8 @@ describe('Issue #485: upstream OAuth error surfacing', () => {
   });
 
   describe('toOAuthErrorResponse', () => {
-    it('maps OAuthUpstreamError to HTTP 400 with passthrough fields', () => {
-      const err = new OAuthUpstreamError(400, 'raw', {
+    it('maps OAuthUpstreamError to upstream HTTP status with passthrough fields', () => {
+      const err = new OAuthUpstreamError(401, 'raw', {
         error: 'invalid_grant',
         error_description: 'AADSTS70043: ...',
         suberror: 'token_expired',
@@ -128,7 +128,7 @@ describe('Issue #485: upstream OAuth error surfacing', () => {
       });
 
       const { status, body } = toOAuthErrorResponse(err);
-      expect(status).toBe(400);
+      expect(status).toBe(401);
       expect(body).toEqual({
         error: 'invalid_grant',
         error_description: 'AADSTS70043: ...',
@@ -141,6 +141,12 @@ describe('Issue #485: upstream OAuth error surfacing', () => {
       const { status, body } = toOAuthErrorResponse(err);
       expect(status).toBe(400);
       expect(body).toEqual({ error: 'invalid_request' });
+    });
+
+    it('falls back to HTTP 400 for invalid upstream statuses', () => {
+      const err = new OAuthUpstreamError(302, 'raw', { error: 'invalid_request' });
+      const { status } = toOAuthErrorResponse(err);
+      expect(status).toBe(400);
     });
 
     it('does not leak trace_id / correlation_id in response body', () => {
