@@ -102,7 +102,7 @@ az webapp create \
   --name mcp-server \
   --resource-group your-rg \
   --plan your-plan \
-  --runtime "NODE:20-lts" \
+  --runtime "NODE:22-lts" \
   --assign-identity
 
 az webapp config appsettings set --name mcp-server --resource-group your-rg \
@@ -141,6 +141,25 @@ When deploying for an organization, create a dedicated app registration instead 
 4. **Create a client secret** under Certificates & secrets, then store it in Key Vault
 
 5. **Store credentials** in Key Vault (see [Azure Key Vault Integration](../README.md#azure-key-vault-integration))
+
+## SharePoint Document Extraction
+
+For an AI client that needs to answer questions from SharePoint documents, keep the server read-only and expose only the retrieval tools it needs. The following configuration enables tenant-wide document discovery and bounded server-side text extraction:
+
+```bash
+MS365_MCP_ORG_MODE=true
+READ_ONLY=1
+ENABLED_TOOLS='^(search-sharepoint-content|extract-drive-item-content|search-sharepoint-sites|list-sharepoint-site-drives|get-drive-item|search-onedrive-files)$'
+MS365_MCP_ALLOWED_SCOPES='Files.Read Files.Read.All Sites.Read.All'
+MS365_MCP_MAX_EXTRACT_FILE_BYTES=10485760
+MS365_MCP_MAX_EXTRACT_CHARACTERS=24000
+```
+
+`search-sharepoint-content` uses Microsoft Search to return ranked document hits with `driveId` and `itemId`. `extract-drive-item-content` then downloads one selected file with the connecting user's delegated token and returns bounded extracted text with its stable SharePoint URL. It supports PDF, DOCX, PPTX, XLSX, CSV, and text files. OCR is deliberately disabled, so scanned PDFs or image-only documents can have little or no extracted text.
+
+The extraction defaults are a 10 MiB file and 24,000-character result. A 30-second deadline covers Graph response headers and streamed download bytes, without retries; Office/PDF parsing runs in one of at most two 128 MiB workers and each worker is terminated after 30 seconds. Limits can be lowered or raised through the variables above, but files and output are hard-capped at 25 MiB and 50,000 characters. Reauthenticate MCP users after adding `Files.Read.All` or `Sites.Read.All` to the app registration so their delegated tokens contain the new scopes.
+
+Do not expose `download-bytes` or `get-download-url` for this model workflow: the former sends whole files as base64 into model context and the latter returns a signed URL that most MCP model hosts cannot download and parse. The generic `search-query` tool is read-only, but declares broad cross-service permissions; `search-sharepoint-content` is the narrower SharePoint document-search surface.
 
 ## Redirect URI Validation
 

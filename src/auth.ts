@@ -1,6 +1,11 @@
 import type { AccountInfo, Configuration, ICachePlugin, TokenCacheContext } from '@azure/msal-node';
 import { AuthError, PublicClientApplication } from '@azure/msal-node';
 import logger from './logger.js';
+import {
+  UTILITY_TOOL_SCOPE_GROUPS,
+  getUtilityToolScopeGroups,
+  isWorkAccountUtilityTool,
+} from './lib/utility-tool-permissions.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
@@ -322,6 +327,15 @@ function buildScopesFromEndpoints(
     );
   });
 
+  for (const toolName of Object.keys(UTILITY_TOOL_SCOPE_GROUPS)) {
+    if (!includeWorkAccountScopes && isWorkAccountUtilityTool(toolName)) continue;
+    if (enabledToolsRegex && !enabledToolsRegex.test(toolName)) continue;
+    const scopeGroups = getUtilityToolScopeGroups(toolName);
+    if (scopeGroups.length > 0) {
+      scopeGroups[0].forEach((scope) => scopesSet.add(scope));
+    }
+  }
+
   const scopes = collapseRedundantScopes(Array.from(scopesSet));
   if (enabledToolsPattern) {
     logger.info(`Built ${scopes.length} scopes for filtered tools: ${scopes.join(', ')}`);
@@ -456,6 +470,30 @@ function buildAllowedScopeDiagnostics(options: AllowedScopeOptions = {}): ScopeD
     // primary group. For an OR-group endpoint enabled via a non-primary alternative, requesting
     // the primary group would both leak scopes outside the allowlist and omit the scope the
     // tool was enabled for. Without an allowlist this is the primary group, unchanged.
+    getEndpointEffectiveLoginScopes(scopeGroups, allowedScopes).forEach((scope) =>
+      effectiveToolScopes.add(scope)
+    );
+    allScopes.forEach((scope) => effectiveToolScopesAllGroups.add(scope));
+  }
+
+  for (const toolName of Object.keys(UTILITY_TOOL_SCOPE_GROUPS)) {
+    if (!options.orgMode && isWorkAccountUtilityTool(toolName)) continue;
+    if (enabledToolsRegex && !enabledToolsRegex.test(toolName)) continue;
+
+    const scopeGroups = getUtilityToolScopeGroups(toolName);
+    const allScopes = scopeGroups.flat();
+    const missingScopes = getMissingAllowedScopesForGroups(scopeGroups, allowedScopes);
+    const loginScopes = scopeGroups[0] ?? [];
+    loginScopes.forEach((scope) => normalToolScopes.add(scope));
+    if (missingScopes.length > 0) {
+      disabledTools.push({
+        toolName,
+        requiredScopes: allScopes.sort((a, b) => a.localeCompare(b)),
+        missingScopes: missingScopes.sort((a, b) => a.localeCompare(b)),
+      });
+      continue;
+    }
+
     getEndpointEffectiveLoginScopes(scopeGroups, allowedScopes).forEach((scope) =>
       effectiveToolScopes.add(scope)
     );

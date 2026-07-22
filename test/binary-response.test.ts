@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isBinaryContentType } from '../src/graph-client.js';
+import GraphClient, { isBinaryContentType } from '../src/graph-client.js';
 
 describe('isBinaryContentType', () => {
   it('returns false for empty/unknown content types', () => {
@@ -59,10 +59,23 @@ describe('isBinaryContentType', () => {
 });
 
 describe('GraphClient binary response handling', () => {
-  it('reads binary bytes via arrayBuffer and returns base64', async () => {
-    // Lazy import so the module graph is fresh for each test run.
-    const { default: GraphClient } = await import('../src/graph-client.js');
+  function createClient(): InstanceType<typeof GraphClient> {
+    const mockAuth = {
+      getToken: async () => 'fake-token',
+    };
+    const mockSecrets = {
+      clientId: 'x',
+      tenantId: 'common',
+      cloudType: 'global',
+    };
+    return new GraphClient(
+      mockAuth as Parameters<typeof GraphClient>[0],
+      mockSecrets as Parameters<typeof GraphClient>[1],
+      'json'
+    );
+  }
 
+  it('reads binary bytes via arrayBuffer and returns base64', async () => {
     // Build a fake JPEG: SOI marker + a tail string. The high bytes would be
     // corrupted by response.text() but must survive arrayBuffer decoding.
     const jpegBytes = new Uint8Array([
@@ -79,19 +92,7 @@ describe('GraphClient binary response handling', () => {
       })) as typeof fetch;
 
     try {
-      const mockAuth = {
-        getToken: async () => 'fake-token',
-      };
-      const mockSecrets = {
-        clientId: 'x',
-        tenantId: 'common',
-        cloudType: 'global',
-      };
-      const client = new GraphClient(
-        mockAuth as Parameters<typeof GraphClient>[0],
-        mockSecrets as Parameters<typeof GraphClient>[1],
-        'json'
-      );
+      const client = createClient();
 
       const result = (await client.makeRequest('/me/photo/$value')) as Record<string, unknown>;
 
@@ -106,8 +107,6 @@ describe('GraphClient binary response handling', () => {
   });
 
   it('returns a JSON /content body verbatim when rawResponse is set (issue #546)', async () => {
-    const { default: GraphClient } = await import('../src/graph-client.js');
-
     // Pretty-printed JSON that JSON.parse->JSON.stringify would not preserve
     // (indentation and trailing newline get dropped).
     const prettyJson = '{\n  "a": 1,\n  "b": 2\n}\n';
@@ -120,19 +119,7 @@ describe('GraphClient binary response handling', () => {
       })) as typeof fetch;
 
     try {
-      const mockAuth = {
-        getToken: async () => 'fake-token',
-      };
-      const mockSecrets = {
-        clientId: 'x',
-        tenantId: 'common',
-        cloudType: 'global',
-      };
-      const client = new GraphClient(
-        mockAuth as Parameters<typeof GraphClient>[0],
-        mockSecrets as Parameters<typeof GraphClient>[1],
-        'json'
-      );
+      const client = createClient();
 
       const result = (await client.makeRequest('/me/drive/items/x/content', {
         rawResponse: true,
@@ -148,8 +135,6 @@ describe('GraphClient binary response handling', () => {
     // End-to-end through graphRequest -> formatJsonResponse, the path the
     // download-bytes tool actually uses. The body must survive verbatim in the
     // serialized MCP content, not just at the makeRequest layer.
-    const { default: GraphClient } = await import('../src/graph-client.js');
-
     const prettyJson = '{\n  "a": 1,\n  "b": 2\n}\n';
 
     const originalFetch = global.fetch;
@@ -160,19 +145,7 @@ describe('GraphClient binary response handling', () => {
       })) as typeof fetch;
 
     try {
-      const mockAuth = {
-        getToken: async () => 'fake-token',
-      };
-      const mockSecrets = {
-        clientId: 'x',
-        tenantId: 'common',
-        cloudType: 'global',
-      };
-      const client = new GraphClient(
-        mockAuth as Parameters<typeof GraphClient>[0],
-        mockSecrets as Parameters<typeof GraphClient>[1],
-        'json'
-      );
+      const client = createClient();
 
       const response = await client.graphRequest('/me/drive/items/x/content', {
         rawResponse: true,
@@ -186,8 +159,6 @@ describe('GraphClient binary response handling', () => {
   });
 
   it('still parses JSON bodies when rawResponse is not set', async () => {
-    const { default: GraphClient } = await import('../src/graph-client.js');
-
     const originalFetch = global.fetch;
     global.fetch = (async () =>
       new Response('{"value":42}', {
@@ -196,24 +167,119 @@ describe('GraphClient binary response handling', () => {
       })) as typeof fetch;
 
     try {
-      const mockAuth = {
-        getToken: async () => 'fake-token',
-      };
-      const mockSecrets = {
-        clientId: 'x',
-        tenantId: 'common',
-        cloudType: 'global',
-      };
-      const client = new GraphClient(
-        mockAuth as Parameters<typeof GraphClient>[0],
-        mockSecrets as Parameters<typeof GraphClient>[1],
-        'json'
-      );
+      const client = createClient();
 
       const result = (await client.makeRequest('/me/messages')) as Record<string, unknown>;
 
       expect(result.value).toBe(42);
       expect(result.rawResponse).toBeUndefined();
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('rejects a response whose declared size exceeds its configured limit before buffering', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = (async () =>
+      new Response(new Uint8Array([1, 2, 3, 4]), {
+        status: 200,
+        headers: { 'content-type': 'application/octet-stream', 'content-length': '4' },
+      })) as typeof fetch;
+
+    try {
+      await expect(
+        createClient().makeRequest('/drives/a/items/b/content', { maxResponseBytes: 3 })
+      ).rejects.toThrow('exceeding the configured limit of 3 bytes');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('applies the configured limit to non-success response bodies', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = (async () =>
+      new Response(new Uint8Array([1, 2, 3, 4]), {
+        status: 404,
+        headers: { 'content-type': 'application/json', 'content-length': '4' },
+      })) as typeof fetch;
+
+    try {
+      await expect(
+        createClient().makeRequest('/drives/a/items/b/content', { maxResponseBytes: 3 })
+      ).rejects.toThrow('exceeding the configured limit of 3 bytes');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('rejects a chunked response that crosses its configured limit while streaming', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1, 2]));
+            controller.enqueue(new Uint8Array([3, 4]));
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/octet-stream' } }
+      )) as typeof fetch;
+
+    try {
+      await expect(
+        createClient().makeRequest('/drives/a/items/b/content', { maxResponseBytes: 3 })
+      ).rejects.toThrow('exceeds the configured limit of 3 bytes');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('rejects a response body that stalls past its configured duration', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start() {
+            // Never write or close: the bounded reader must reject on timeout.
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/octet-stream' } }
+      )) as typeof fetch;
+
+    try {
+      await expect(
+        createClient().makeRequest('/drives/a/items/b/content', { maxResponseDurationMs: 20 })
+      ).rejects.toThrow('did not finish within the configured');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('rejects delayed response headers within its configured duration without retrying', async () => {
+    const originalFetch = global.fetch;
+    let attempts = 0;
+    global.fetch = ((_input, init) => {
+      attempts += 1;
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = (init as Parameters<typeof fetch>[1] | undefined)?.signal;
+        signal?.addEventListener(
+          'abort',
+          () => {
+            const error = new Error('aborted');
+            error.name = 'AbortError';
+            reject(error);
+          },
+          { once: true }
+        );
+      });
+    }) as typeof fetch;
+
+    try {
+      await expect(
+        createClient().makeRequest('/drives/a/items/b/content', { maxResponseDurationMs: 20 })
+      ).rejects.toThrow('did not finish within the configured 20 ms limit');
+      expect(attempts).toBe(1);
     } finally {
       global.fetch = originalFetch;
     }

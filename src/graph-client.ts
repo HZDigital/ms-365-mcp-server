@@ -60,8 +60,99 @@ interface GraphRequestOptions {
   // Pin this response to JSON regardless of the configured format, so the
   // fetchAllPages merge can JSON.parse each page before re-encoding (#560).
   forceJsonOutput?: boolean;
+  // Enforce an upper bound while a response body is streamed. This is used by
+  // server-side document extraction so a stale Graph size value cannot cause
+  // an unbounded base64 buffer to be allocated first.
+  maxResponseBytes?: number;
+  // Bounds the full Graph operation, including headers and body streaming. A
+  // bounded request disables retries so its deadline cannot multiply per try.
+  maxResponseDurationMs?: number;
 
   [key: string]: unknown;
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Best effort: the caller is already reporting the original limit error.
+  }
+}
+
+async function readResponseBytes(
+  response: Response,
+  maxBytes?: number,
+  maxDurationMs?: number
+): Promise<Buffer> {
+  if (maxDurationMs !== undefined && maxDurationMs <= 0) {
+    await cancelResponseBody(response);
+    throw new Error(
+      `Microsoft Graph response did not finish within the configured ${maxDurationMs} ms limit.`
+    );
+  }
+
+  const contentLength = response.headers.get('content-length');
+  if (maxBytes !== undefined && contentLength) {
+    const declaredBytes = Number.parseInt(contentLength, 10);
+    if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+      await cancelResponseBody(response);
+      throw new Error(
+        `Microsoft Graph response is ${declaredBytes} bytes, exceeding the configured limit of ${maxBytes} bytes.`
+      );
+    }
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) return Buffer.alloc(0);
+
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  let timedOut = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise =
+    maxDurationMs === undefined
+      ? undefined
+      : new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => {
+            timedOut = true;
+            reject(
+              new Error(
+                `Microsoft Graph response did not finish within the configured ${maxDurationMs} ms limit.`
+              )
+            );
+            void reader.cancel();
+          }, maxDurationMs);
+        });
+
+  try {
+    while (true) {
+      const next = timeoutPromise
+        ? await Promise.race([reader.read(), timeoutPromise])
+        : await reader.read();
+      if (next.done) break;
+
+      totalBytes += next.value.byteLength;
+      if (maxBytes !== undefined && totalBytes > maxBytes) {
+        void reader.cancel();
+        throw new Error(
+          `Microsoft Graph response exceeds the configured limit of ${maxBytes} bytes.`
+        );
+      }
+      chunks.push(next.value);
+    }
+  } catch (error) {
+    if (timedOut) {
+      throw new Error(
+        `Microsoft Graph response did not finish within the configured ${maxDurationMs} ms limit.`
+      );
+    }
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    reader.releaseLock();
+  }
+
+  return Buffer.concat(chunks, totalBytes);
 }
 
 interface ContentItem {
@@ -104,10 +195,22 @@ class GraphClient {
     }
 
     try {
+      const requestStartedAt = Date.now();
       const response = await this.performRequest(endpoint, accessToken, options);
 
+      const needsBoundedRead =
+        options.maxResponseBytes !== undefined || options.maxResponseDurationMs !== undefined;
+      const remainingDurationMs =
+        options.maxResponseDurationMs === undefined
+          ? undefined
+          : options.maxResponseDurationMs - (Date.now() - requestStartedAt);
+      const responseBytes = needsBoundedRead
+        ? await readResponseBytes(response, options.maxResponseBytes, remainingDurationMs)
+        : undefined;
+      const responseText = () => (responseBytes ? responseBytes.toString('utf8') : response.text());
+
       if (response.status === 403) {
-        const errorText = await response.text();
+        const errorText = await responseText();
         if (errorText.includes('scope') || errorText.includes('permission')) {
           throw new Error(
             `Microsoft Graph API scope error: ${response.status} ${response.statusText} - ${errorText}. This tool requires organization mode. Please restart with --org-mode flag.`
@@ -120,7 +223,7 @@ class GraphClient {
 
       if (!response.ok) {
         throw new Error(
-          `Microsoft Graph API error: ${response.status} ${response.statusText} - ${await response.text()}`
+          `Microsoft Graph API error: ${response.status} ${response.statusText} - ${await responseText()}`
         );
       }
 
@@ -134,7 +237,7 @@ class GraphClient {
         // decoded with response.text() — that performs a lossy UTF-8 decode and
         // replaces every high byte with U+FFFD, destroying the file. Read the
         // raw bytes and return them as base64 so callers can reconstruct them.
-        const buffer = Buffer.from(await response.arrayBuffer());
+        const buffer = responseBytes ?? Buffer.from(await response.arrayBuffer());
         result = {
           message: 'OK!',
           contentType: contentTypeHeader,
@@ -143,7 +246,7 @@ class GraphClient {
           contentBytes: buffer.toString('base64'),
         };
       } else {
-        const text = await response.text();
+        const text = responseBytes ? responseBytes.toString('utf8') : await response.text();
 
         if (text === '') {
           result = { message: 'OK!' };
@@ -199,17 +302,35 @@ class GraphClient {
       ...options.headers,
     };
 
-    return fetchWithResilience(
-      url,
-      {
-        method: options.method || 'GET',
-        headers,
-        // Node's fetch accepts Buffer/Uint8Array; TS BodyInit doesn't.
-        body: options.body as unknown as string,
-      },
-      loadResilienceConfig(),
-      getSharedBreaker()
-    );
+    const resilienceConfig = loadResilienceConfig();
+    if (options.maxResponseDurationMs !== undefined) {
+      resilienceConfig.fetchTimeoutMs = Math.min(
+        resilienceConfig.fetchTimeoutMs,
+        options.maxResponseDurationMs
+      );
+      resilienceConfig.maxRetries = 0;
+    }
+
+    try {
+      return await fetchWithResilience(
+        url,
+        {
+          method: options.method || 'GET',
+          headers,
+          // Node's fetch accepts Buffer/Uint8Array; TS BodyInit doesn't.
+          body: options.body as unknown as string,
+        },
+        resilienceConfig,
+        getSharedBreaker()
+      );
+    } catch (error) {
+      if (options.maxResponseDurationMs !== undefined && (error as Error).name === 'AbortError') {
+        throw new Error(
+          `Microsoft Graph response did not finish within the configured ${options.maxResponseDurationMs} ms limit.`
+        );
+      }
+      throw error;
+    }
   }
 
   private serializeData(data: unknown, outputFormat: 'json' | 'toon', pretty = false): string {

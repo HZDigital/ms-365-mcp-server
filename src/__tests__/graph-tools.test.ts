@@ -998,6 +998,211 @@ describe('graph-tools', () => {
     });
   });
 
+  // ---- 9a. SharePoint document search and extraction utilities ----
+  describe('SharePoint document utilities', () => {
+    it('searches drive items and returns extraction-ready identifiers', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const graphClient = {
+        graphRequest: vi.fn().mockResolvedValue({
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                value: [
+                  {
+                    hitsContainers: [
+                      {
+                        hits: [
+                          {
+                            rank: 1,
+                            summary: 'Packaging clause excerpt',
+                            resource: {
+                              id: 'item-1',
+                              name: 'framework-agreement.docx',
+                              webUrl: 'https://contoso.sharepoint.com/sites/procurement/doc.docx',
+                              parentReference: { driveId: 'drive-1' },
+                              file: {
+                                mimeType:
+                                  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                              },
+                              size: 1024,
+                              lastModifiedDateTime: '2026-07-22T00:00:00Z',
+                            },
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              }),
+            },
+          ],
+        }),
+      };
+
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any, false, undefined, true);
+
+      const result = await server.tools
+        .get('search-sharepoint-content')!
+        .handler({ query: 'framework packaging', maxResults: 5 });
+
+      expect(graphClient.graphRequest).toHaveBeenCalledWith(
+        '/search/query',
+        expect.objectContaining({ method: 'POST', forceJsonOutput: true })
+      );
+      const [, options] = graphClient.graphRequest.mock.calls[0];
+      expect(JSON.parse(options.body)).toEqual({
+        requests: [
+          {
+            entityTypes: ['driveItem'],
+            query: { queryString: 'framework packaging' },
+            from: 0,
+            size: 5,
+            fields: [
+              'id',
+              'name',
+              'webUrl',
+              'file',
+              'parentReference',
+              'size',
+              'lastModifiedDateTime',
+            ],
+          },
+        ],
+      });
+
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.hits).toEqual([
+        expect.objectContaining({
+          driveId: 'drive-1',
+          itemId: 'item-1',
+          name: 'framework-agreement.docx',
+        }),
+      ]);
+    });
+
+    it('downloads a selected text drive item and returns extracted content instead of base64', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const graphClient = {
+        graphRequest: vi
+          .fn()
+          .mockResolvedValueOnce({
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  id: 'item-1',
+                  name: 'clauses.txt',
+                  size: 30,
+                  webUrl: 'https://contoso.sharepoint.com/sites/procurement/clauses.txt',
+                  file: { mimeType: 'text/plain' },
+                }),
+              },
+            ],
+          })
+          .mockResolvedValueOnce({
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({ rawResponse: 'Payment is due within 30 days.' }),
+              },
+            ],
+          }),
+      };
+
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any, false, undefined, true);
+
+      const result = await server.tools
+        .get('extract-drive-item-content')!
+        .handler({ driveId: 'drive-1', itemId: 'item-1', maxCharacters: 1000 });
+
+      expect(graphClient.graphRequest.mock.calls).toEqual([
+        ['/drives/drive-1/items/item-1', expect.objectContaining({ forceJsonOutput: true })],
+        [
+          '/drives/drive-1/items/item-1/content',
+          expect.objectContaining({
+            rawResponse: true,
+            forceJsonOutput: true,
+            maxResponseBytes: 10 * 1024 * 1024,
+            maxResponseDurationMs: 30_000,
+          }),
+        ],
+      ]);
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload).toEqual(
+        expect.objectContaining({
+          name: 'clauses.txt',
+          text: 'Payment is due within 30 days.',
+          truncated: false,
+          ocrApplied: false,
+        })
+      );
+      expect(payload).not.toHaveProperty('contentBytes');
+    });
+
+    it('rejects an oversized file before downloading its content', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const graphClient = {
+        graphRequest: vi.fn().mockResolvedValue({
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                name: 'large.pdf',
+                size: 10 * 1024 * 1024 + 1,
+                file: { mimeType: 'application/pdf' },
+              }),
+            },
+          ],
+        }),
+      };
+
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any, false, undefined, true);
+
+      const result = await server.tools
+        .get('extract-drive-item-content')!
+        .handler({ driveId: 'drive-1', itemId: 'item-1' });
+
+      expect(result.isError).toBe(true);
+      expect(graphClient.graphRequest).toHaveBeenCalledTimes(1);
+      expect(result.content[0].text).toMatch(/exceeding the extraction limit/);
+    });
+
+    it('applies allowed scopes to the SharePoint utilities', async () => {
+      mockEndpoints.length = 0;
+      mockEndpointsJson = [];
+
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(
+        server as any,
+        {} as any,
+        true,
+        '^(search-sharepoint-content|extract-drive-item-content)$',
+        true,
+        undefined,
+        false,
+        [],
+        'Files.Read Sites.Read.All'
+      );
+
+      expect(server.tools.has('extract-drive-item-content')).toBe(true);
+      expect(server.tools.has('search-sharepoint-content')).toBe(false);
+    });
+  });
+
   // ---- 9b. get-download-url utility tool ----
   describe('get-download-url', () => {
     it('strips /content, fetches item metadata, and returns the pre-authed downloadUrl', async () => {

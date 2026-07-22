@@ -61,8 +61,8 @@ describe('buildScopesFromEndpoints', () => {
       expect(scopes).not.toContain('Mail.ReadWrite');
     });
 
-    it('includes Files.Read and Sites.Read.All for read-only search tools', () => {
-      expect(scopes).toContain('Files.Read');
+    it('includes Files.Read.All and Sites.Read.All for read-only SharePoint search tools', () => {
+      expect(scopes).toContain('Files.Read.All');
       expect(scopes).toContain('Sites.Read.All');
     });
   });
