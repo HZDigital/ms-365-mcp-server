@@ -7,6 +7,7 @@ import {
   presetRequiresOrgMode,
   TOOL_CATEGORIES,
 } from '../src/tool-categories.js';
+import { DYNAMICS_TOOL_PRESETS } from '../src/dynamics-tools.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,14 +15,14 @@ const __dirname = path.dirname(__filename);
 const endpoints: Array<{ toolName: string; pathPattern: string; presets?: string[] }> = JSON.parse(
   readFileSync(path.join(__dirname, '..', 'src', 'endpoints.json'), 'utf8')
 );
-const allToolNames = [...new Set(endpoints.map((e) => e.toolName))];
+const allToolNames = [...new Set([...endpoints.map((e) => e.toolName), ...DYNAMICS_TOOL_PRESETS])];
 
 function matchedTools(preset: string): string[] {
   const re = new RegExp(TOOL_CATEGORIES[preset].pattern.source, 'i');
   return allToolNames.filter((name) => re.test(name));
 }
 
-describe('presets from endpoints.json', () => {
+describe('tool presets', () => {
   it('endpoints.json presets values are limited to known preset names', () => {
     const known = new Set(Object.keys(TOOL_CATEGORIES).filter((name) => name !== 'all'));
     const unknown = endpoints.filter((e) => e.presets?.some((p) => !known.has(p)));
@@ -104,13 +105,26 @@ describe('presets from endpoints.json', () => {
     expect(presetRequiresOrgMode('mail')).toBe(false);
     expect(presetRequiresOrgMode('outlook')).toBe(false);
     expect(presetRequiresOrgMode('onedrive')).toBe(false);
+    expect(presetRequiresOrgMode('dynamics')).toBe(true);
+  });
+
+  it('dynamics contains only configured Dynamics tools', () => {
+    const tools = matchedTools('dynamics');
+    expect(tools).toContain('dynamics-query-records');
+    expect(tools).toContain('dynamics-create-account');
+    expect(tools).not.toContain('list-mail-messages');
   });
 
   it('presets compose via getCombinedPresetPattern', () => {
     const re = new RegExp(getCombinedPresetPattern(['outlook', 'onedrive']), 'i');
     expect(re.test('list-mail-messages')).toBe(true);
     expect(re.test('get-drive-root-item')).toBe(true);
+    expect(re.test('dynamics-query-records')).toBe(false);
     expect(re.test('list-chats')).toBe(false);
+
+    const withDynamics = new RegExp(getCombinedPresetPattern(['mail', 'dynamics']), 'i');
+    expect(withDynamics.test('list-mail-messages')).toBe(true);
+    expect(withDynamics.test('dynamics-query-records')).toBe(true);
   });
 
   it('all matches everything', () => {

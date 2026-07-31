@@ -265,7 +265,8 @@ describe('allowed scope HTTP behavior', () => {
       expect.anything(),
       false,
       [],
-      'Mail.Read'
+      'Mail.Read',
+      []
     );
   });
 });

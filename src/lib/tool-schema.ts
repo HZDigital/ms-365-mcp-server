@@ -99,6 +99,7 @@ interface UtilityDescriptor {
   path: string;
   description: string;
   buildSchema: (ctx: never) => Record<string, z.ZodTypeAny>;
+  readOnlyHint?: boolean;
 }
 
 // Params reported as `Query` (top-level): execute-tool passes `parameters`
@@ -132,6 +133,16 @@ export function describeUtilityToolSchema<C>(
       schema,
     };
   });
+  if (isDestructiveOperation(utility.method, { readOnly: utility.readOnlyHint === true })) {
+    params.push({
+      name: 'confirm',
+      in: 'Query',
+      required: false,
+      description:
+        'For destructive operations when the confirm gate is enabled (MS365_MCP_REQUIRE_CONFIRM=true; off by default). Set true only after the user has explicitly approved this action.',
+      schema: { type: 'boolean' },
+    });
+  }
   return {
     name: utility.name,
     method: utility.method,

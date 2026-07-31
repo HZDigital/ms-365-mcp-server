@@ -13,9 +13,9 @@ MCP Clients (Claude Desktop, Claude Code, Open WebUI, ...)
    │  ms-365-mcp-server --http   │  Azure Container Apps / App Service / Docker
    │  (stateless, no token store)│
    └─────────────┬───────────────┘
-                 │  Bearer token (per-user)
-                 ▼
-         Microsoft Graph API
+                 │  OBO token exchange (per-user, when --obo)
+                 ├─────────────────────► Microsoft Graph API
+                 └─────────────────────► Dataverse API (when configured)
 ```
 
 ## Headless stdio auth-cache storage
@@ -55,6 +55,22 @@ docker run -p 3000:3000 \
   --http 3000 --org-mode
 ```
 
+### Dynamics 365 CRM / Dataverse
+
+Configure exactly one Dataverse organization origin and run the server with HTTP OBO and organization mode. The URL is deployment configuration rather than a secret, but it is an authorization boundary: only this HTTPS origin receives a Dataverse token.
+
+```bash
+docker run -p 3000:3000 \
+  -e MS365_MCP_CLIENT_ID=your-client-id \
+  -e MS365_MCP_TENANT_ID=your-tenant-id \
+  -e MS365_MCP_CLIENT_SECRET=your-secret \
+  -e MS365_MCP_DYNAMICS_URL=https://contoso.crm.dynamics.com \
+  ms-365-mcp-server \
+  --http 3000 --obo --org-mode --preset dynamics
+```
+
+The configured URL must be an HTTPS origin with no path, credentials, query string, or fragment. OBO retains the incoming MCP token as the user assertion and exchanges it independently for Graph and Dataverse `/.default` tokens. Configure the Entra application to expose its `access_as_user` scope, add **Dynamics CRM** delegated `user_impersonation` and the required Microsoft Graph delegated permissions, then grant admin consent. Dataverse security roles continue to govern which records each caller can access or change.
+
 ## Azure Container Apps
 
 > **Turnkey Bicep example**: see [`examples/azure-container-apps/`](../examples/azure-container-apps/) for a complete Bicep template + PowerShell deploy script that provisions Log Analytics, UAMI, Key Vault (RBAC), Container Apps Environment and the Container App in one command.
@@ -80,10 +96,10 @@ docker run -p 3000:3000 \
      --cpu 0.5 --memory 1Gi \
      --system-assigned \
      --env-vars \
-       "MS365_MCP_KEYVAULT_URL=https://your-keyvault.vault.azure.net" \
+        "MS365_MCP_KEYVAULT_URL=https://your-keyvault.vault.azure.net" \
        "MS365_MCP_ORG_MODE=true" \
        "MS365_MCP_PUBLIC_URL=https://mcp.example.com" \
-     --command "node" "dist/index.js" "--http" "3000" "--org-mode"
+      --command "node" "dist/index.js" "--http" "3000" "--org-mode"
    ```
 
 3. **Grant Key Vault access** to the managed identity:
@@ -131,6 +147,8 @@ When deploying for an organization, create a dedicated app registration instead 
 
 2. **Add API permissions** > Microsoft Graph > Delegated permissions
    Run `npx @softeria/ms-365-mcp-server --org-mode --list-permissions` to print the exact list of permissions required for your enabled tools.
+
+For Dynamics OBO deployments, also expose the MCP app's `access_as_user` delegated permission, add **Dynamics CRM** > Delegated `user_impersonation`, and configure the exact `MS365_MCP_DYNAMICS_URL` organization origin. The application needs a client secret for OBO.
 
 3. **Grant admin consent** to skip per-user consent prompts:
 

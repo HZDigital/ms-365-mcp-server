@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import { DYNAMICS_TOOL_PRESETS } from './dynamics-tools.js';
 
 export interface ToolCategory {
   name: string;
@@ -14,11 +15,13 @@ const __dirname = path.dirname(__filename);
 const endpointEntries = JSON.parse(
   readFileSync(path.join(__dirname, 'endpoints.json'), 'utf8')
 ) as Array<{ toolName: string; presets?: string[] }>;
+const toolEntries = [
+  ...endpointEntries,
+  ...DYNAMICS_TOOL_PRESETS.map((toolName) => ({ toolName, presets: ['dynamics'] })),
+];
 
-// Preset metadata. Membership lives in endpoints.json: each endpoint declares
-// which presets it belongs to via its `presets` array, so presets are exact
-// tool-name allow-lists that can't over-match across apps the way the old
-// loose name regexes could (e.g. "mail" also matching shared-mailbox tools).
+// Preset membership is declared by Graph endpoints and manually registered
+// tools, so every pattern remains an exact tool-name allow-list.
 const PRESET_META: Record<string, { description: string; requiresOrgMode?: boolean }> = {
   mail: {
     description: 'Email operations (read, send, manage folders, attachments)',
@@ -66,14 +69,18 @@ const PRESET_META: Record<string, { description: string; requiresOrgMode?: boole
     description: 'Teams app only: chats, channels, meetings and presence',
     requiresOrgMode: true,
   },
+  dynamics: {
+    description: 'Dynamics 365 CRM and Dataverse tools for the configured organization',
+    requiresOrgMode: true,
+  },
 };
 
 function presetPattern(preset: string): RegExp {
   const names = [
-    ...new Set(endpointEntries.filter((e) => e.presets?.includes(preset)).map((e) => e.toolName)),
+    ...new Set(toolEntries.filter((e) => e.presets?.includes(preset)).map((e) => e.toolName)),
   ];
   if (names.length === 0) {
-    throw new Error(`Preset "${preset}" matches no endpoints in endpoints.json`);
+    throw new Error(`Preset "${preset}" matches no tools`);
   }
   return new RegExp(`^(?:${names.join('|')})$`);
 }

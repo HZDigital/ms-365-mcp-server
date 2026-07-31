@@ -47,6 +47,8 @@ export interface ResilienceConfig {
   circuitFailureThreshold: number;
   circuitCooldownMs: number;
   circuitDisabled: boolean;
+  /** Graph throttles before mutations execute; other APIs can opt out. */
+  retryThrottledMutations?: boolean;
 }
 
 export function loadResilienceConfig(): ResilienceConfig {
@@ -263,7 +265,8 @@ export async function fetchWithResilience(
     // so retrying a throttled POST is safe and follows Graph's documented
     // contract.
     const is429 = response !== null && response.status === 429;
-    const retryAllowedByMethod = methodIsIdempotent || is429;
+    const retryAllowedByMethod =
+      methodIsIdempotent || (is429 && config.retryThrottledMutations !== false);
 
     // Determine whether to retry
     const canRetry = attempt < config.maxRetries && retryAllowedByMethod;

@@ -4,8 +4,7 @@
 
 Microsoft 365 MCP Server
 
-A Model Context Protocol (MCP) server for interacting with Microsoft 365 and Microsoft Office services through the Graph
-API.
+A Model Context Protocol (MCP) server for interacting with Microsoft 365 and Microsoft Office services through Microsoft Graph, with optional Dynamics 365 CRM / Dataverse tools.
 
 ## Supported Clouds
 
@@ -93,7 +92,7 @@ MS365_MCP_OUTPUT_FORMAT=toon npx @softeria/ms-365-mcp-server
 
 ## Supported Services & Tools
 
-The server provides 200+ tools covering most of the Microsoft Graph API surface. Each tool maps 1-to-1 to a Graph API endpoint and is defined declaratively in [`src/endpoints.json`](src/endpoints.json).
+The server provides 200+ tools covering most of the Microsoft Graph API surface. Graph tools map 1-to-1 to Graph endpoints and are defined declaratively in [`src/endpoints.json`](src/endpoints.json). Optional Dynamics tools use a deployment-configured Dataverse organization and include generic custom-table CRUD plus CRM conveniences.
 
 ### Personal Account Tools (Available by default)
 
@@ -102,6 +101,24 @@ Email (Outlook), Calendar, OneDrive Files, Excel, OneNote, To Do Tasks, Planner,
 ### Organization Account Tools (Requires --org-mode flag)
 
 Teams & Chats, Online Meetings, Transcripts & Recordings, Attendance Reports, SharePoint Sites & Lists, Shared Mailboxes & Calendars, User Management, Presence, Virtual Events
+
+### Dynamics 365 CRM / Dataverse (Requires HTTP OBO + --org-mode)
+
+Set one exact Dataverse organization origin to enable Dynamics tools. The server accepts an HTTPS origin only, such as `https://contoso.crm.dynamics.com`; it rejects paths, query strings, fragments, credentials, and tool-supplied hosts.
+
+```bash
+MS365_MCP_CLIENT_ID=<app-client-id> \
+MS365_MCP_CLIENT_SECRET=<app-client-secret> \
+MS365_MCP_TENANT_ID=<tenant-id> \
+MS365_MCP_DYNAMICS_URL=https://contoso.crm.dynamics.com \
+npx @softeria/ms-365-mcp-server --http 3000 --obo --org-mode --preset dynamics
+```
+
+Dynamics tools are deliberately available only with `--http --obo --org-mode`. Each MCP request is exchanged separately for Graph and Dataverse, using the original caller assertion; one resource token is never sent to the other service.
+
+The `dynamics` preset includes generic metadata, query, get, create, update, and delete tools for standard and custom entity sets. It also includes curated account, contact, lead, and opportunity helpers. Activities are read through `activitypointers`; create helpers target concrete Dataverse entities (`task`, `phonecall`, and `appointment`) rather than a polymorphic activity write endpoint. Custom-table payloads remain tenant-defined passthrough objects.
+
+Dataverse authorizes requests with the caller's own Dynamics security roles. Configure the Entra app with **Dynamics CRM** delegated `user_impersonation`, the needed Microsoft Graph delegated permissions, and tenant-wide admin consent. For OBO, also expose the MCP app's `access_as_user` delegated permission to the MCP client. `--read-only` and `MS365_MCP_REQUIRE_CONFIRM=true` apply to Dynamics writes just as they do to Graph writes.
 
 ### Required Graph API Permissions
 
@@ -147,7 +164,7 @@ CLI value takes precedence over `MS365_MCP_ALLOWED_SCOPES`; if neither is set, t
 
 Scope coverage is hierarchy-aware: for example, `Mail.ReadWrite` covers tools that require `Mail.Read`, and `Files.ReadWrite.All` covers tools that require `Files.Read`.
 
-In HTTP mode, OAuth discovery advertises the effective filtered permissions so clients request the same consent surface. On-Behalf-Of mode (`--obo`) still advertises `api://<clientId>/access_as_user` for protected-resource metadata; `--allowed-scopes` does not override OBO.
+In HTTP mode, OAuth discovery advertises the effective filtered permissions so clients request the same consent surface. On-Behalf-Of mode (`--obo`) still advertises `<clientId>/access_as_user` for protected-resource metadata; `--allowed-scopes` does not override OBO.
 
 ### Requesting extra scopes
 
@@ -379,6 +396,10 @@ This mode:
 
 MCP clients will automatically handle the OAuth flow when they see the advertised capabilities.
 
+##### On-Behalf-Of mode for Dynamics
+
+Dynamics requires `--obo`, a confidential-client secret, and organization mode. The incoming MCP token remains an assertion for the whole request; the server lazily obtains separate downstream tokens for Microsoft Graph and the configured Dataverse origin. Do not use `MS365_MCP_OAUTH_TOKEN` or non-OBO bearer forwarding for a combined Graph and Dynamics deployment.
+
 ##### Setting up Azure AD for OAuth Testing
 
 To use OAuth mode with custom Azure credentials (recommended for production), you'll need to set up an Azure AD app
@@ -515,9 +536,9 @@ npx @softeria/ms-365-mcp-server --preset mail
 npx @softeria/ms-365-mcp-server --list-presets  # See all available presets
 ```
 
-Available presets: `mail`, `calendar`, `files`, `personal`, `work`, `excel`, `contacts`, `tasks`, `onenote`, `search`, `users`, `outlook`, `onedrive`, `teams`, `all`
+Available presets: `mail`, `calendar`, `files`, `personal`, `work`, `excel`, `contacts`, `tasks`, `onenote`, `search`, `users`, `outlook`, `onedrive`, `teams`, `dynamics`, `all`
 
-Each endpoint in `endpoints.json` declares which presets it belongs to via a `presets` array, so every preset is an exact tool-name allow-list that never over-matches across apps (e.g. `mail` does not include shared-mailbox tools; those are in `work`).
+Each Graph endpoint in `endpoints.json` and each manually declared Dynamics tool declares its preset membership, so every preset is an exact tool-name allow-list that never over-matches across apps (e.g. `mail` does not include shared-mailbox tools; those are in `work`).
 
 The `outlook`, `onedrive` and `teams` presets are app-scoped: they expose exactly one Microsoft app. Use these for "expose exactly one app" deployments:
 
@@ -527,6 +548,9 @@ npx @softeria/ms-365-mcp-server --preset outlook
 
 # Teams only (requires --org-mode)
 npx @softeria/ms-365-mcp-server --org-mode --preset teams
+
+# Dynamics only (requires --http --obo --org-mode and MS365_MCP_DYNAMICS_URL)
+npx @softeria/ms-365-mcp-server --http 3000 --obo --org-mode --preset dynamics
 ```
 
 ## Dynamic Tool Discovery
@@ -566,7 +590,9 @@ When running as an MCP server, the following options can be used:
 -v                Enable verbose logging
 --read-only       Start server in read-only mode, disabling write operations
 --http [port]     Use Streamable HTTP transport instead of stdio (optionally specify port, default: 3000)
-                  Starts Express.js server with MCP endpoint at /mcp
+                   Starts Express.js server with MCP endpoint at /mcp
+--obo             Exchange incoming MCP tokens for downstream Graph and Dataverse tokens (requires HTTP and a client secret)
+--dynamics-url <url> Configure one HTTPS Dynamics 365 / Dataverse organization origin (requires --http --obo --org-mode)
 --enable-auth-tools Enable login/logout tools when using HTTP mode (disabled by default in HTTP mode)
 --no-dynamic-registration Disable OAuth Dynamic Client Registration (enabled by default in HTTP mode)
 --enabled-tools <pattern> Filter tools using regex pattern (e.g., "excel|contact" to enable Excel and Contact tools)
@@ -598,6 +624,7 @@ Environment variables:
 - `MS365_MCP_CLIENT_ID`: Custom Azure app client ID (defaults to built-in app)
 - `MS365_MCP_TENANT_ID`: Custom tenant ID (defaults to 'common' for multi-tenant). **Personal Microsoft accounts should set this to `consumers`** - as of June 2026, refresh tokens issued via the default 'common' authority are rejected at the first refresh, so sessions die roughly an hour after login
 - `MS365_MCP_OAUTH_TOKEN`: Pre-existing OAuth token for Microsoft Graph API (BYOT method)
+- `MS365_MCP_DYNAMICS_URL`: Exact HTTPS Dynamics 365 / Dataverse organization origin, such as `https://contoso.crm.dynamics.com`. Requires `--http --obo --org-mode`; the server rejects paths, query strings, fragments, and credentials.
 - `MS365_MCP_KEYVAULT_URL`: Azure Key Vault URL for secrets management (see Azure Key Vault section)
 - `MS365_MCP_TOKEN_CACHE_PATH`: Custom file path for MSAL token cache (see Token Storage below)
 - `MS365_MCP_SELECTED_ACCOUNT_PATH`: Custom file path for selected account metadata (see Token Storage below)

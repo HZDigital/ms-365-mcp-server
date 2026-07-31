@@ -248,7 +248,7 @@ type ResourceContent = ResourceTextContent | ResourceBlobContent;
 
 type ContentItem = TextContent | ImageContent | AudioContent | ResourceContent;
 
-interface CallToolResult {
+export interface CallToolResult {
   content: ContentItem[];
   _meta?: Record<string, unknown>;
   isError?: boolean;
@@ -256,14 +256,14 @@ interface CallToolResult {
   [key: string]: unknown;
 }
 
-interface UtilityToolContext {
+export interface UtilityToolContext {
   graphClient: GraphClient;
   authManager?: AuthManager;
   multiAccount: boolean;
   accountNames: string[];
 }
 
-interface UtilityTool {
+export interface UtilityTool {
   name: string;
   // Synthetic for display in search-tools / get-tool-schema. The `tool:` prefix
   // marks these as non-Graph so an LLM doesn't try to construct a Graph URL from them.
@@ -275,6 +275,10 @@ interface UtilityTool {
   execute: (params: Record<string, unknown>, ctx: UtilityToolContext) => Promise<CallToolResult>;
   readOnlyHint?: boolean;
   openWorldHint?: boolean;
+  /** Service-neutral manual tools can opt into org-mode without Graph scopes. */
+  orgOnly?: boolean;
+  service?: 'graph' | 'dynamics';
+  presets?: string[];
 }
 
 interface DisabledToolScope {
@@ -1035,6 +1039,108 @@ export const UTILITY_TOOLS: readonly UtilityTool[] = [
   },
 ];
 
+function isReadOnlyUtilityTool(utility: UtilityTool): boolean {
+  return utility.readOnlyHint ?? utility.method.toUpperCase() === 'GET';
+}
+
+function isOrgOnlyUtilityTool(utility: UtilityTool): boolean {
+  return utility.orgOnly === true || isWorkAccountUtilityTool(utility.name);
+}
+
+function utilitySchema(
+  utility: UtilityTool,
+  ctx: UtilityToolContext
+): Record<string, z.ZodTypeAny> {
+  const schema = { ...utility.buildSchema(ctx) };
+  if (isDestructiveOperation(utility.method, { readOnly: isReadOnlyUtilityTool(utility) })) {
+    schema.confirm = z
+      .boolean()
+      .describe(
+        'For destructive operations when the confirm gate is enabled (MS365_MCP_REQUIRE_CONFIRM=true; off by default). Set true only after the user explicitly approved this action.'
+      )
+      .optional();
+  }
+  return schema;
+}
+
+async function executeUtilityTool(
+  utility: UtilityTool,
+  params: Record<string, unknown>,
+  ctx: UtilityToolContext
+): Promise<CallToolResult> {
+  const requestId = randomUUID();
+  const startTime = Date.now();
+  const requestToken = getRequestTokens();
+  const upn = getUserIdentityForAudit(requestToken?.accessToken ?? requestToken?.userAssertion);
+  const destructive = isDestructiveOperation(utility.method, {
+    readOnly: isReadOnlyUtilityTool(utility),
+  });
+
+  if (isConfirmGateEnabled() && destructive && params.confirm !== true) {
+    auditLog({
+      event: 'tool.call',
+      request_id: requestId,
+      user_principal_name: upn,
+      tool: utility.name,
+      http_method: utility.method.toUpperCase(),
+      status: 'denied',
+      duration_ms: Date.now() - startTime,
+      target_resource: { type: utility.service ?? 'manual' },
+    });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            error: 'confirmation_required',
+            tool: utility.name,
+            method: utility.method.toUpperCase(),
+            destructive: true,
+            message:
+              'This tool modifies user data. Re-call with parameter "confirm": true after the user has explicitly approved the operation.',
+          }),
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  try {
+    const toolParams = { ...params };
+    delete toolParams.confirm;
+    const result = await utility.execute(toolParams, ctx);
+    auditLog({
+      event: 'tool.call',
+      request_id: requestId,
+      user_principal_name: upn,
+      tool: utility.name,
+      http_method: utility.method.toUpperCase(),
+      status: result.isError ? 'error' : 'success',
+      duration_ms: Date.now() - startTime,
+      target_resource: { type: utility.service ?? 'manual' },
+    });
+    return result;
+  } catch (error) {
+    const err = error as { name?: string; code?: string | number; status?: string | number };
+    auditLog({
+      event: 'tool.call',
+      request_id: requestId,
+      user_principal_name: upn,
+      tool: utility.name,
+      http_method: utility.method.toUpperCase(),
+      status: 'error',
+      duration_ms: Date.now() - startTime,
+      target_resource: { type: utility.service ?? 'manual' },
+      error_type: err.name ?? 'Error',
+      error_code: err.status ?? err.code,
+    });
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ error: (error as Error).message }) }],
+      isError: true,
+    };
+  }
+}
+
 function registerUtilityToolWithMcp(
   server: McpServer,
   utility: UtilityTool,
@@ -1043,13 +1149,16 @@ function registerUtilityToolWithMcp(
   server.tool(
     utility.name,
     utility.description,
-    utility.buildSchema(ctx),
+    utilitySchema(utility, ctx),
     {
       title: utility.name,
-      readOnlyHint: utility.readOnlyHint ?? true,
+      readOnlyHint: isReadOnlyUtilityTool(utility),
+      destructiveHint: isDestructiveOperation(utility.method, {
+        readOnly: isReadOnlyUtilityTool(utility),
+      }),
       openWorldHint: utility.openWorldHint ?? true,
     },
-    async (params) => utility.execute(params, ctx)
+    async (params) => executeUtilityTool(utility, params, ctx)
   );
 }
 
@@ -1689,7 +1798,8 @@ export function registerGraphTools(
   authManager?: AuthManager,
   multiAccount: boolean = false,
   accountNames: string[] = [],
-  allowedScopesValue?: string
+  allowedScopesValue?: string,
+  manualTools: readonly UtilityTool[] = []
 ): number {
   let enabledToolsRegex: RegExp | undefined;
   if (enabledToolsPattern) {
@@ -1988,9 +2098,9 @@ export function registerGraphTools(
     multiAccount,
     accountNames,
   };
-  for (const utility of UTILITY_TOOLS) {
-    if (!orgMode && isWorkAccountUtilityTool(utility.name)) continue;
-    if (readOnly && !utility.readOnlyHint) continue;
+  for (const utility of [...UTILITY_TOOLS, ...manualTools]) {
+    if (!orgMode && isOrgOnlyUtilityTool(utility)) continue;
+    if (readOnly && !isReadOnlyUtilityTool(utility)) continue;
     if (enabledToolsRegex && !enabledToolsRegex.test(utility.name)) continue;
     const missingScopes = getMissingAllowedScopesForGroups(
       getUtilityToolScopeGroups(utility.name),
@@ -2181,7 +2291,8 @@ export function registerDiscoveryTools(
   multiAccount: boolean = false,
   accountNames: string[] = [],
   enabledTools?: string,
-  allowedScopesValue?: string
+  allowedScopesValue?: string,
+  manualTools: readonly UtilityTool[] = []
 ): void {
   let enabledToolsRegex: RegExp | undefined;
   if (enabledTools) {
@@ -2204,9 +2315,9 @@ export function registerDiscoveryTools(
     disabledByAllowedScopes
   );
   const allowedScopes = parseAllowedScopes(allowedScopesValue);
-  const utilityTools = UTILITY_TOOLS.filter((u) => {
-    if (!orgMode && isWorkAccountUtilityTool(u.name)) return false;
-    if (readOnly && !u.readOnlyHint) return false;
+  const utilityTools = [...UTILITY_TOOLS, ...manualTools].filter((u) => {
+    if (!orgMode && isOrgOnlyUtilityTool(u)) return false;
+    if (readOnly && !isReadOnlyUtilityTool(u)) return false;
     if (enabledToolsRegex && !enabledToolsRegex.test(u.name)) return false;
     const missingScopes = getMissingAllowedScopesForGroups(
       getUtilityToolScopeGroups(u.name),
@@ -2226,7 +2337,7 @@ export function registerDiscoveryTools(
   const searchIndex = buildDiscoverySearchIndex(toolsRegistry, utilityTools);
   const totalCount = toolsRegistry.size + utilityTools.length;
   logger.info(
-    `Discovery mode: ${totalCount} tools (${toolsRegistry.size} Graph + ${utilityTools.length} utility)`
+    `Discovery mode: ${totalCount} tools (${toolsRegistry.size} Microsoft Graph + ${utilityTools.length} manual service tools)`
   );
 
   const utilityCtx: UtilityToolContext = {
@@ -2269,7 +2380,7 @@ export function registerDiscoveryTools(
 
   server.tool(
     'search-tools',
-    `Search through ${totalCount} tools (${toolsRegistry.size} Microsoft Graph API operations + ${utilityTools.length} server utilities like download-bytes). Ranks results by BM25 over tool name, llmTip, description, and path. After picking a tool, call get-tool-schema for parameters, then execute-tool.`,
+    `Search through ${totalCount} tools (${toolsRegistry.size} Microsoft Graph API operations + ${utilityTools.length} manually declared service tools). Ranks results by BM25 over tool name, llmTip, description, and path. After picking a tool, call get-tool-schema for parameters, then execute-tool.`,
     {
       query: z
         .string()
@@ -2365,7 +2476,7 @@ export function registerDiscoveryTools(
 
   server.tool(
     'execute-tool',
-    'Execute a Microsoft Graph API tool by name. Workflow: search-tools → get-tool-schema → execute-tool. Call get-tool-schema first for any tool you have not seen before — passing the wrong shape to parameters will fail validation or return a Graph 400. For list endpoints, prefer modest $top plus $select.',
+    'Execute a discovered tool by name. Workflow: search-tools → get-tool-schema → execute-tool. Call get-tool-schema first for any tool you have not seen before: invalid parameters fail validation or the downstream API request. For list endpoints, prefer modest $top plus $select.',
     {
       tool_name: z.string().describe('Name of the tool to execute (e.g., "list-mail-messages")'),
       parameters: z
@@ -2394,7 +2505,7 @@ export function registerDiscoveryTools(
       }
       const utility = utilityByName.get(tool_name);
       if (utility) {
-        return utility.execute(parameters, utilityCtx);
+        return executeUtilityTool(utility, parameters, utilityCtx);
       }
       return {
         content: [

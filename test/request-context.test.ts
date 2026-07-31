@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getRequestTokens, requestContext } from '../src/request-context.js';
+import {
+  createOboRequestContext,
+  getRequestTokens,
+  requestContext,
+} from '../src/request-context.js';
 import GraphClient from '../src/graph-client.js';
 import type AuthManager from '../src/auth.js';
 import { AppSecrets } from '../src/secrets.js';
@@ -72,6 +76,19 @@ describe('request-context', () => {
     expect(tokens).toContain('first');
     expect(tokens).toContain('second');
     expect(tokens).toContain(undefined);
+  });
+
+  it('retries a resource exchange after a cached exchange failure', async () => {
+    let attempts = 0;
+    const context = createOboRequestContext('assertion', async () => {
+      attempts++;
+      if (attempts === 1) throw new Error('temporary exchange failure');
+      return 'recovered-token';
+    });
+
+    await expect(context.getAccessToken!('graph')).rejects.toThrow('temporary exchange failure');
+    await expect(context.getAccessToken!('graph')).resolves.toBe('recovered-token');
+    expect(attempts).toBe(2);
   });
 });
 

@@ -3,7 +3,7 @@ import AuthManager from './auth.js';
 import { encode as toonEncode } from '@toon-format/toon';
 import type { AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
-import { getRequestTokens } from './request-context.js';
+import { getRequestAccessToken } from './request-context.js';
 import {
   fetchWithResilience,
   getSharedBreaker,
@@ -186,9 +186,10 @@ class GraphClient {
   }
 
   async makeRequest(endpoint: string, options: GraphRequestOptions = {}): Promise<unknown> {
-    const contextTokens = getRequestTokens();
     const accessToken =
-      options.accessToken ?? contextTokens?.accessToken ?? (await this.authManager.getToken());
+      options.accessToken ??
+      (await getRequestAccessToken('graph')) ??
+      (await this.authManager.getToken());
 
     if (!accessToken) {
       throw new Error('No access token available');
