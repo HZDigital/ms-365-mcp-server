@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { z } from 'zod';
 
+const { mockAuditLog } = vi.hoisted(() => ({ mockAuditLog: vi.fn() }));
+
 /**
  * We test executeGraphTool logic by importing it indirectly through registerGraphTools.
  * Strategy: mock GraphClient, create a real McpServer, register tools, then invoke them.
@@ -13,6 +15,18 @@ vi.mock('../logger.js', () => ({
     warn: vi.fn(),
     error: vi.fn(),
     debug: vi.fn(),
+  },
+}));
+
+vi.mock('../audit-log.js', () => ({
+  auditLog: mockAuditLog,
+  getUserIdentityForAudit: (token?: string) => {
+    if (!token) return undefined;
+    try {
+      return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()).upn;
+    } catch {
+      return undefined;
+    }
   },
 }));
 
@@ -1985,6 +1999,39 @@ describe('graph-tools', () => {
       expect(payload.error).toBe('confirmation_required');
       expect(payload.tool).toBe('delete-mail-message');
       expect(payload.destructive).toBe(true);
+    });
+
+    it('audits a denied OBO call using the incoming assertion identity', async () => {
+      const endpoint = makeEndpoint({
+        method: 'delete',
+        path: '/me/messages/:message-id',
+        alias: 'delete-mail-message',
+      });
+      const config = makeConfig({
+        pathPattern: '/me/messages/{message-id}',
+        method: 'delete',
+        toolName: 'delete-mail-message',
+      });
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [config];
+
+      const graphClient = createMockGraphClient();
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      const { requestContext } = await import('../request-context.js');
+      registerGraphTools(server as any, graphClient as any);
+
+      await requestContext.run({ userAssertion: makeJwt({ upn: 'obo.user@example.com' }) }, () =>
+        server.tools.get('delete-mail-message')!.handler({ messageId: 'abc' })
+      );
+
+      expect(mockAuditLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tool: 'delete-mail-message',
+          status: 'denied',
+          user_principal_name: 'obo.user@example.com',
+        })
+      );
     });
 
     it('allows DELETE when confirm: true is passed', async () => {

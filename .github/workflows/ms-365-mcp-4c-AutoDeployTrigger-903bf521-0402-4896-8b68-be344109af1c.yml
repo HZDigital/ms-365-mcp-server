@@ -46,4 +46,14 @@ jobs:
           _buildArgumentsKey_: |
             _buildArgumentsValues_
 
+      # This repository variable is intentionally scoped to the 4C deployment.
+      # The image already supplies --http and --org-mode; OBO adds the separate
+      # per-user Dataverse token required by the Dynamics tools.
+      - name: Enable Dynamics 365 CRM for 4C
+        run: |
+          az containerapp update \
+            --name ms-365-mcp-4c \
+            --resource-group rg-mindscape \
+            --args=--obo
+
 

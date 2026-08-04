@@ -55,6 +55,9 @@ param orgMode bool = true
 @description('Enable --read-only flag (disables write operations).')
 param readOnly bool = false
 
+@description('Optional HTTPS Dynamics 365 / Dataverse organization origin. Enables --obo and Dynamics tools; requires a confidential-client secret.')
+param dynamicsUrl string = ''
+
 @description('Min replicas for autoscale. Set to 0 for scale-to-zero (cold start ~2-5s).')
 param minReplicas int = 0
 
@@ -184,7 +187,7 @@ resource cae 'Microsoft.App/managedEnvironments@2024-03-01' = {
 }
 
 // ---------- Container App ----------
-var containerArgs = concat(['--http', '3000'], orgMode ? ['--org-mode'] : [], readOnly ? ['--read-only'] : [])
+var containerArgs = concat(['--http', '3000'], (orgMode || !empty(dynamicsUrl)) ? ['--org-mode'] : [], readOnly ? ['--read-only'] : [], !empty(dynamicsUrl) ? ['--obo', '--dynamics-url', dynamicsUrl] : [])
 
 resource app 'Microsoft.App/containerApps@2024-03-01' = {
   name: appName

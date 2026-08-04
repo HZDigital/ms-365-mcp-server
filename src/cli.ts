@@ -84,7 +84,11 @@ program
   )
   .option(
     '--obo',
-    'Enable On-Behalf-Of token exchange in HTTP mode. Exchanges the incoming bearer token for a Graph API token using the OBO flow. Requires MS365_MCP_CLIENT_SECRET.'
+    'Enable On-Behalf-Of token exchange in HTTP mode. Exchanges the incoming bearer token for downstream API tokens using the OBO flow. Requires MS365_MCP_CLIENT_SECRET.'
+  )
+  .option(
+    '--dynamics-url <url>',
+    'Configured HTTPS Dynamics 365 / Dataverse organization origin. Requires --http --obo --org-mode. Equivalent env var: MS365_MCP_DYNAMICS_URL.'
   )
   .option(
     '--trust-proxy-auth',
@@ -130,6 +134,7 @@ export interface CommandOptions {
   dynamicRegistration?: boolean;
   authBrowser?: boolean;
   obo?: boolean;
+  dynamicsUrl?: string;
   trustProxyAuth?: boolean;
   allowUnauthenticatedDiscovery?: boolean;
   publicUrl?: string;
@@ -286,6 +291,10 @@ export function parseArgs(): CommandOptions {
 
   if (process.env.MS365_MCP_OBO === 'true' || process.env.MS365_MCP_OBO === '1') {
     options.obo = true;
+  }
+
+  if (options.dynamicsUrl === undefined && process.env.MS365_MCP_DYNAMICS_URL !== undefined) {
+    options.dynamicsUrl = process.env.MS365_MCP_DYNAMICS_URL;
   }
 
   if (

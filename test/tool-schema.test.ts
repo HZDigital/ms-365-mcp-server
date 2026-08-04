@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { buildToolsRegistry } from '../src/graph-tools.js';
-import { describeToolSchema } from '../src/lib/tool-schema.js';
+import { describeToolSchema, describeUtilityToolSchema } from '../src/lib/tool-schema.js';
+import type { UtilityTool } from '../src/graph-tools.js';
 
 const registry = buildToolsRegistry(false, true);
 
@@ -68,5 +70,31 @@ describe('describeToolSchema', () => {
     if (!entry) return;
     const s = describeToolSchema(entry.tool, entry.config);
     expect(s.parameters.find((p) => p.name === 'confirm')).toBeUndefined();
+  });
+
+  it('applies confirmation metadata to manual Dynamics mutations only', () => {
+    const mutation: UtilityTool = {
+      name: 'dynamics-create-record',
+      method: 'POST',
+      path: 'tool:dynamics-create-record',
+      description: 'Create a Dataverse record.',
+      buildSchema: () => ({ entity_set: z.string(), body: z.record(z.string(), z.unknown()) }),
+      execute: async () => ({ content: [] }),
+      readOnlyHint: false,
+      service: 'dynamics',
+    };
+    const query: UtilityTool = {
+      ...mutation,
+      name: 'dynamics-query-records',
+      method: 'POST',
+      readOnlyHint: true,
+    };
+
+    expect(
+      describeUtilityToolSchema(mutation, undefined).parameters.find((p) => p.name === 'confirm')
+    ).toBeDefined();
+    expect(
+      describeUtilityToolSchema(query, undefined).parameters.find((p) => p.name === 'confirm')
+    ).toBeUndefined();
   });
 });

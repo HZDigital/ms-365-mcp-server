@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseArgs } from '../src/cli.js';
 import { registerGraphTools } from '../src/graph-tools.js';
 import type { GraphClient } from '../src/graph-client.js';
+import type { UtilityTool } from '../src/graph-tools.js';
 
 vi.mock('../src/cli.js', () => {
   const parseArgsMock = vi.fn();
@@ -178,5 +179,61 @@ describe('Read-Only Mode', () => {
     expect(toolCalls).not.toContain('update-mail-folder');
     // DELETE is always blocked in read-only mode
     expect(toolCalls).not.toContain('delete-mail-message');
+  });
+
+  it('keeps read-only Dynamics utilities while omitting Dynamics writes', () => {
+    const dynamicsTools: UtilityTool[] = [
+      {
+        name: 'dynamics-query-records',
+        method: 'POST',
+        path: 'tool:dynamics-query-records',
+        description: 'Query Dataverse records.',
+        buildSchema: () => ({}),
+        execute: async () => ({ content: [] }),
+        readOnlyHint: true,
+        orgOnly: true,
+        service: 'dynamics',
+      },
+      {
+        name: 'dynamics-create-record',
+        method: 'POST',
+        path: 'tool:dynamics-create-record',
+        description: 'Create a Dataverse record.',
+        buildSchema: () => ({}),
+        execute: async () => ({ content: [] }),
+        readOnlyHint: false,
+        orgOnly: true,
+        service: 'dynamics',
+      },
+      {
+        name: 'dynamics-delete-record',
+        method: 'DELETE',
+        path: 'tool:dynamics-delete-record',
+        description: 'Delete a Dataverse record.',
+        buildSchema: () => ({}),
+        execute: async () => ({ content: [] }),
+        readOnlyHint: false,
+        orgOnly: true,
+        service: 'dynamics',
+      },
+    ];
+
+    registerGraphTools(
+      mockServer,
+      {} as GraphClient,
+      true,
+      undefined,
+      true,
+      undefined,
+      false,
+      [],
+      undefined,
+      dynamicsTools
+    );
+
+    const toolCalls = mockServer.tool.mock.calls.map((call: unknown[]) => call[0]);
+    expect(toolCalls).toContain('dynamics-query-records');
+    expect(toolCalls).not.toContain('dynamics-create-record');
+    expect(toolCalls).not.toContain('dynamics-delete-record');
   });
 });

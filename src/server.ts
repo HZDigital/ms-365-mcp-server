@@ -8,6 +8,7 @@ import rateLimit from 'express-rate-limit';
 import logger, { enableConsoleLogging } from './logger.js';
 import { registerAuthTools } from './auth-tools.js';
 import { registerGraphTools, registerDiscoveryTools } from './graph-tools.js';
+import type { UtilityTool } from './graph-tools.js';
 import { buildMcpServerInstructions } from './mcp-instructions.js';
 import GraphClient from './graph-client.js';
 import AuthManager, {
@@ -30,6 +31,10 @@ import { getCloudEndpoints } from './cloud-config.js';
 import { requestContext } from './request-context.js';
 import { dumpError } from './crash-logging.js';
 import OboClient from './obo-client.js';
+import DataverseClient from './dataverse-client.js';
+import { parseDynamicsUrl } from './dynamics-config.js';
+import { createDynamicsTools } from './dynamics-tools.js';
+import { createOboRequestContext } from './request-context.js';
 
 /**
  * Parse HTTP option into host and port components.
@@ -93,6 +98,7 @@ class MicrosoftGraphServer {
   private version: string = '0.0.0';
   private multiAccount: boolean = false;
   private accountNames: string[] = [];
+  private dynamicsTools: readonly UtilityTool[] = [];
 
   constructor(authManager: AuthManager, options: CommandOptions = {}) {
     this.authManager = authManager;
@@ -134,7 +140,8 @@ class MicrosoftGraphServer {
         this.multiAccount,
         this.accountNames,
         this.options.enabledTools,
-        this.options.allowedScopes
+        this.options.allowedScopes,
+        this.dynamicsTools
       );
     } else {
       registerGraphTools(
@@ -146,7 +153,8 @@ class MicrosoftGraphServer {
         this.authManager,
         this.multiAccount,
         this.accountNames,
-        this.options.allowedScopes
+        this.options.allowedScopes,
+        this.dynamicsTools
       );
     }
 
@@ -156,6 +164,19 @@ class MicrosoftGraphServer {
   async initialize(version: string): Promise<void> {
     this.secrets = await getSecrets();
     this.version = version;
+    const dynamicsConfig = parseDynamicsUrl(this.options.dynamicsUrl);
+    if (dynamicsConfig) {
+      if (!this.options.http || !this.options.obo) {
+        throw new Error(
+          '--dynamics-url requires --http --obo so Graph and Dataverse receive separate delegated tokens.'
+        );
+      }
+      if (!this.options.orgMode) {
+        throw new Error(
+          '--dynamics-url requires --org-mode because Dynamics CRM tools are organization tools.'
+        );
+      }
+    }
 
     // Detect multi-account mode and cache account names for schema enum.
     // Skip in HTTP bearer mode and BYOT: those requests are authenticated by the
@@ -198,12 +219,16 @@ class MicrosoftGraphServer {
           '--obo cannot be combined with --trust-proxy-auth: the proxy-auth pass-through skips the incoming bearer token that OBO would exchange.'
         );
       }
-      this.oboClient = new OboClient(this.secrets);
+      this.oboClient = new OboClient(this.secrets, dynamicsConfig);
       logger.info('On-Behalf-Of (OBO) flow enabled');
     }
 
     const outputFormat = this.options.toon ? 'toon' : 'json';
     this.graphClient = new GraphClient(this.authManager, this.secrets, outputFormat);
+    if (dynamicsConfig) {
+      this.dynamicsTools = createDynamicsTools(new DataverseClient(dynamicsConfig));
+      logger.info(`Dynamics 365 CRM enabled for ${dynamicsConfig.origin}`);
+    }
 
     if (!this.options.http) {
       this.server = this.createMcpServer();
@@ -662,11 +687,17 @@ class MicrosoftGraphServer {
 
           try {
             if (req.microsoftAuth) {
-              let accessToken = req.microsoftAuth.accessToken;
               if (this.oboClient) {
-                accessToken = await this.oboClient.exchangeToken(accessToken);
+                const assertion = req.microsoftAuth.accessToken;
+                await requestContext.run(
+                  createOboRequestContext(assertion, (resource) =>
+                    this.oboClient!.exchangeToken(assertion, resource)
+                  ),
+                  handler
+                );
+              } else {
+                await requestContext.run({ accessToken: req.microsoftAuth.accessToken }, handler);
               }
-              await requestContext.run({ accessToken }, handler);
             } else {
               await handler();
             }
@@ -707,11 +738,17 @@ class MicrosoftGraphServer {
 
           try {
             if (req.microsoftAuth) {
-              let accessToken = req.microsoftAuth.accessToken;
               if (this.oboClient) {
-                accessToken = await this.oboClient.exchangeToken(accessToken);
+                const assertion = req.microsoftAuth.accessToken;
+                await requestContext.run(
+                  createOboRequestContext(assertion, (resource) =>
+                    this.oboClient!.exchangeToken(assertion, resource)
+                  ),
+                  handler
+                );
+              } else {
+                await requestContext.run({ accessToken: req.microsoftAuth.accessToken }, handler);
               }
-              await requestContext.run({ accessToken }, handler);
             } else {
               await handler();
             }

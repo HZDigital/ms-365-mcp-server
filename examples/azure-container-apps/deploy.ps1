@@ -41,6 +41,7 @@ param(
   [string[]]$KvAdminObjectIds = @(),
   [bool]$OrgMode = $true,
   [bool]$ReadOnly = $false,
+  [string]$DynamicsUrl = '',
   [int]$MinReplicas = 0,
   [int]$MaxReplicas = 3,
   [switch]$SkipLogin,
@@ -114,6 +115,7 @@ $params = @{
   publicBaseUrl  = @{ value = $PublicBaseUrl }
   orgMode        = @{ value = $OrgMode }
   readOnly       = @{ value = $ReadOnly }
+  dynamicsUrl    = @{ value = $DynamicsUrl }
   minReplicas    = @{ value = $MinReplicas }
   maxReplicas    = @{ value = $MaxReplicas }
   kvAdminObjectIds = @{ value = $KvAdminObjectIds }

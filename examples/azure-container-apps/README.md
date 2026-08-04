@@ -16,7 +16,7 @@ MCP client (Claude Desktop / claude.ai / ...)
          │ HTTPS + OAuth 2.0 (Dynamic Client Registration)
          ▼
    Container App  (<baseName>-app)
-     - args: --http 3000 [--org-mode] [--read-only]
+      - args: --http 3000 [--org-mode] [--read-only] [--obo --dynamics-url <origin>]
      - scale 0-3 on concurrent HTTP requests
          │ DefaultAzureCredential (UAMI)
          ▼
@@ -27,7 +27,8 @@ MCP client (Claude Desktop / claude.ai / ...)
      - ms365-mcp-client-secret  (optional — confidential client)
          │
          ▼
-   Microsoft Graph API  (per-user delegated token)
+    Microsoft Graph API  (per-user delegated token)
+    Dataverse API        (optional, per-user OBO token)
 ```
 
 ## Prerequisites
@@ -51,6 +52,14 @@ Create an app registration in your tenant:
   Grant admin consent in Entra ID for all `*.All` scopes.
 - **Authentication → Allow public client flows**: Yes (if you will not use a client secret)
 - **Certificates & secrets** (optional): create a client secret for confidential-client mode
+
+For Dynamics, expose the MCP app's `access_as_user` scope, add **Dynamics CRM** delegated `user_impersonation`, grant admin consent, and create a client secret. Supply the one configured organization origin during deployment:
+
+```powershell
+./deploy.ps1 ... -DynamicsUrl 'https://contoso.crm.dynamics.com'
+```
+
+The URL must be an HTTPS origin only. This adds `--obo --dynamics-url` to the container arguments; Dynamics tools also require `-OrgMode $true`.
 
 Collect `tenantId`, `clientId`, and (optionally) `clientSecret`.
 
