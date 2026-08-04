@@ -50,12 +50,10 @@ jobs:
       # The image already supplies --http and --org-mode; OBO adds the separate
       # per-user Dataverse token required by the Dynamics tools.
       - name: Enable Dynamics 365 CRM for 4C
-        if: ${{ vars.MS365MCP4C_DYNAMICS_URL != '' }}
         run: |
           az containerapp update \
             --name ms-365-mcp-4c \
             --resource-group rg-mindscape \
-            --set-env-vars "MS365_MCP_DYNAMICS_URL=${{ vars.MS365MCP4C_DYNAMICS_URL }}" \
             --args=--obo
 
 
