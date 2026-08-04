@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import DataverseClient from '../src/dataverse-client.js';
 import { parseDynamicsUrl } from '../src/dynamics-config.js';
 import { createDynamicsTools, DYNAMICS_TOOL_PRESETS } from '../src/dynamics-tools.js';
+import type { UtilityToolContext } from '../src/graph-tools.js';
 import { __resetDataverseBreakerForTests } from '../src/lib/dataverse-resilience.js';
 import { createOboRequestContext, requestContext } from '../src/request-context.js';
 
@@ -138,6 +139,19 @@ describe('Dynamics tools', () => {
     expect(tools.find((tool) => tool.name === 'dynamics-query-records')?.readOnlyHint).toBe(true);
     expect(tools.find((tool) => tool.name === 'dynamics-create-record')?.readOnlyHint).toBe(false);
     expect(tools.every((tool) => tool.orgOnly && tool.service === 'dynamics')).toBe(true);
+  });
+
+  it('passes metadata expansions through to Dataverse', async () => {
+    const client = {
+      request: vi.fn().mockResolvedValue({ value: [] }),
+    } as unknown as DataverseClient;
+    const tool = createDynamicsTools(client).find((item) => item.name === 'dynamics-list-tables')!;
+
+    await tool.execute({ expand: 'Attributes($select=LogicalName)' }, {} as UtilityToolContext);
+
+    expect(client.request).toHaveBeenCalledWith(
+      expect.stringContaining('$expand=Attributes(%24select%3DLogicalName)')
+    );
   });
 });
 

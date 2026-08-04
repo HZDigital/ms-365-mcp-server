@@ -1225,6 +1225,12 @@ async function executeGraphTool(
 ): Promise<CallToolResult> {
   logger.info(`Tool ${tool.alias} called with params: ${JSON.stringify(params)}`);
 
+  const requestId = randomUUID();
+  const startTime = Date.now();
+  const requestToken = getRequestTokens();
+  const upn = getUserIdentityForAudit(requestToken?.accessToken ?? requestToken?.userAssertion);
+  const httpMethod = tool.method.toUpperCase();
+
   if (
     isConfirmGateEnabled() &&
     isDestructiveOperation(tool.method, config) &&
@@ -1233,6 +1239,15 @@ async function executeGraphTool(
     logger.warn(
       `Refusing destructive tool ${tool.alias} (${tool.method.toUpperCase()}): missing confirm: true`
     );
+    auditLog({
+      event: 'tool.call',
+      request_id: requestId,
+      user_principal_name: upn,
+      tool: tool.alias,
+      http_method: httpMethod,
+      status: 'denied',
+      duration_ms: Date.now() - startTime,
+    });
     return {
       content: [
         {
@@ -1250,11 +1265,6 @@ async function executeGraphTool(
       isError: true,
     };
   }
-
-  const requestId = randomUUID();
-  const startTime = Date.now();
-  const upn = getUserIdentityForAudit(getRequestTokens()?.accessToken);
-  const httpMethod = tool.method.toUpperCase();
 
   try {
     const accountParam = params.account as string | undefined;

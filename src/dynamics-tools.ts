@@ -182,6 +182,7 @@ export function createDynamicsTools(client: DataverseClient): readonly UtilityTo
             `/EntityDefinitions${queryString({
               select: params.select ?? 'LogicalName,EntitySetName,DisplayName',
               filter: params.filter,
+              expand: params.expand,
               orderby: params.orderby,
               top: params.top,
             })}`
