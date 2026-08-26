@@ -33,6 +33,39 @@ describe('--list-permissions diagnostics', () => {
     );
   });
 
+  it('keeps shared-calendar tools enabled with their delegated shared scope', () => {
+    const output = buildAllowedScopeDiagnostics({
+      orgMode: true,
+      enabledTools: 'list-shared-calendar-events|get-shared-calendar-view',
+      allowedScopes: 'Calendars.Read.Shared',
+    });
+
+    expect(output.toolPermissions).toEqual(['Calendars.Read.Shared']);
+    expect(output.effectivePermissions).toEqual(['Calendars.Read.Shared']);
+    expect(output.disabledTools).toEqual([]);
+  });
+
+  it('reports shared-calendar tools as disabled without their delegated shared scope', () => {
+    const output = buildAllowedScopeDiagnostics({
+      orgMode: true,
+      enabledTools: 'list-shared-calendar-events|get-shared-calendar-view',
+      allowedScopes: 'Calendars.Read',
+    });
+
+    expect(output.disabledTools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolName: 'list-shared-calendar-events',
+          missingScopes: ['Calendars.Read.Shared'],
+        }),
+        expect.objectContaining({
+          toolName: 'get-shared-calendar-view',
+          missingScopes: ['Calendars.Read.Shared'],
+        }),
+      ])
+    );
+  });
+
   it('keeps hierarchy coverage from reporting false missing scopes', () => {
     const output = buildScopeDiagnostics(['Files.Read', 'Mail.Read'], ['Mail.Read']);
 

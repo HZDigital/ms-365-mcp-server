@@ -72,10 +72,20 @@ describe('tool presets', () => {
     const tools = matchedTools('outlook');
     expect(tools).toContain('list-mail-messages');
     expect(tools).toContain('create-calendar-event');
+    expect(tools).toContain('list-shared-calendar-events');
+    expect(tools).toContain('get-shared-calendar-view');
     expect(tools).toContain('list-outlook-contacts');
     expect(tools).not.toContain('list-shared-mailbox-messages');
     expect(tools).not.toContain('get-drive-item');
     expect(tools).not.toContain('list-chats');
+  });
+
+  it('calendar includes shared-calendar reads without shared-mailbox leakage', () => {
+    const tools = matchedTools('calendar');
+    expect(tools).toContain('list-calendar-events');
+    expect(tools).toContain('list-shared-calendar-events');
+    expect(tools).toContain('get-shared-calendar-view');
+    expect(tools).not.toContain('list-shared-mailbox-messages');
   });
 
   it('onedrive covers drive operations without excel or mail-folder leakage', () => {

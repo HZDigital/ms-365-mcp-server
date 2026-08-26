@@ -210,6 +210,17 @@ organization.
 
 Example: `list-shared-mailbox-messages` with `user-id` set to `shared-mailbox@company.com`
 
+## Shared Calendar Access
+
+To read a calendar another work or school user has shared with you, start the server with
+`--org-mode` and consent to the delegated `Calendars.Read.Shared` permission. The signed-in user
+must also have the required Exchange sharing permission on that calendar.
+
+Use `list-shared-calendar-events` with the calendar owner's email address or Entra user ID as
+`user-id`. For a date range or expanded recurring-event occurrences, use
+`get-shared-calendar-view` with `startDateTime` and `endDateTime`. Both tools are available with
+the `calendar`, `outlook`, and `work` presets in organization mode.
+
 ## Quick Start Example
 
 Test login in Claude Desktop:
