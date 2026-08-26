@@ -48,6 +48,12 @@ describe('buildScopesFromEndpoints', () => {
       expect(org).toContain('Sites.Read.All');
       expect(personal).not.toContain('Sites.Read.All');
     });
+
+    it('includes shared-calendar consent only in org mode', () => {
+      const tools = 'list-shared-calendar-events|get-shared-calendar-view';
+      expect(buildScopesFromEndpoints(true, tools, true)).toContain('Calendars.Read.Shared');
+      expect(buildScopesFromEndpoints(false, tools, true)).not.toContain('Calendars.Read.Shared');
+    });
   });
 
   describe('org-mode + read-only + "search|query" filter', () => {
