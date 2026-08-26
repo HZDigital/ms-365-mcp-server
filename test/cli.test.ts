@@ -55,6 +55,9 @@ describe('CLI Module', () => {
     delete process.env.MS365_MCP_EXPECTED_USERNAME;
     delete process.env.MS365_MCP_EXPECTED_HOME_ACCOUNT_ID;
     delete process.env.MS365_MCP_AUTH_CACHE_COMMAND;
+    delete process.env.MS365_MCP_DYNAMICS_URL;
+    delete process.env.MS365_MCP_IS_STAGING;
+    delete process.env.MS365_MCP_DYNAMICS_STAGING_URL;
   });
 
   afterEach(() => {
@@ -63,6 +66,9 @@ describe('CLI Module', () => {
     delete process.env.MS365_MCP_EXPECTED_USERNAME;
     delete process.env.MS365_MCP_EXPECTED_HOME_ACCOUNT_ID;
     delete process.env.MS365_MCP_AUTH_CACHE_COMMAND;
+    delete process.env.MS365_MCP_DYNAMICS_URL;
+    delete process.env.MS365_MCP_IS_STAGING;
+    delete process.env.MS365_MCP_DYNAMICS_STAGING_URL;
   });
 
   describe('parseArgs', () => {
@@ -223,6 +229,50 @@ describe('CLI Module', () => {
       expect(optionFlags).not.toContain('--auth-cache-command <command>');
       expect(result).not.toHaveProperty('authCacheCommand');
       expect(result).not.toHaveProperty('authCacheCommandArgs');
+    });
+
+    it('uses the staging Dynamics URL when MS365_MCP_IS_STAGING=true', () => {
+      process.env.MS365_MCP_DYNAMICS_URL = 'https://production.crm.dynamics.com';
+      process.env.MS365_MCP_IS_STAGING = 'true';
+      process.env.MS365_MCP_DYNAMICS_STAGING_URL = 'https://staging.crm.dynamics.com';
+      commanderMocks.mockCommand.opts.mockReturnValue({
+        dynamicsUrl: 'https://cli.crm.dynamics.com',
+      });
+
+      const result = parseArgs();
+
+      expect(result.dynamicsUrl).toBe('https://staging.crm.dynamics.com');
+    });
+
+    it('uses the standard Dynamics URL when the deployment is not staging', () => {
+      process.env.MS365_MCP_DYNAMICS_URL = 'https://production.crm.dynamics.com';
+      process.env.MS365_MCP_IS_STAGING = 'false';
+      process.env.MS365_MCP_DYNAMICS_STAGING_URL = 'https://staging.crm.dynamics.com';
+
+      const result = parseArgs();
+
+      expect(result.dynamicsUrl).toBe('https://production.crm.dynamics.com');
+    });
+
+    it('supports 1 as the staging deployment flag', () => {
+      process.env.MS365_MCP_IS_STAGING = '1';
+      process.env.MS365_MCP_DYNAMICS_STAGING_URL = 'https://staging.crm.dynamics.com';
+
+      const result = parseArgs();
+
+      expect(result.dynamicsUrl).toBe('https://staging.crm.dynamics.com');
+    });
+
+    it('refuses to fall back to the standard Dynamics URL in staging', () => {
+      process.env.MS365_MCP_DYNAMICS_URL = 'https://production.crm.dynamics.com';
+      process.env.MS365_MCP_IS_STAGING = 'true';
+
+      parseArgs();
+
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('MS365_MCP_DYNAMICS_STAGING_URL')
+      );
+      expect(process.exit).toHaveBeenCalledWith(1);
     });
   });
 

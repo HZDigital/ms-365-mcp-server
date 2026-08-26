@@ -122,6 +122,7 @@ describe('tool presets', () => {
     const tools = matchedTools('dynamics');
     expect(tools).toContain('dynamics-query-records');
     expect(tools).toContain('dynamics-create-account');
+    expect(tools).toContain('dynamics-list-audits');
     expect(tools).not.toContain('list-mail-messages');
   });
 
