@@ -164,6 +164,8 @@ export const DYNAMICS_TOOL_PRESETS = [
   ]),
   'dynamics-list-activities',
   'dynamics-get-activity',
+  'dynamics-list-audits',
+  'dynamics-get-audit',
   'dynamics-create-task',
   'dynamics-create-phonecall',
   'dynamics-create-appointment',
@@ -402,6 +404,26 @@ export function createDynamicsTools(client: DataverseClient): readonly UtilityTo
           await client.request(
             `${recordPath('activitypointers', recordId(params.id))}${queryString(params)}`
           )
+        )
+    ),
+    dynamicsTool(
+      'dynamics-list-audits',
+      'GET',
+      "List Dataverse audit records. Audit access is governed by the caller's Dynamics security role and organization audit settings.",
+      () => ({ ...querySchema }),
+      async (params) => textResult(await client.request(`/audits${queryString(params)}`))
+    ),
+    dynamicsTool(
+      'dynamics-get-audit',
+      'GET',
+      "Get one Dataverse audit record by GUID. Audit access is governed by the caller's Dynamics security role and organization audit settings.",
+      () => ({
+        id: z.string().regex(GUID).describe('Dynamics audit record GUID.'),
+        ...querySchema,
+      }),
+      async (params) =>
+        textResult(
+          await client.request(`${recordPath('audits', recordId(params.id))}${queryString(params)}`)
         )
     )
   );

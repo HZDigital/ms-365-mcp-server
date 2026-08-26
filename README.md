@@ -116,7 +116,7 @@ npx @softeria/ms-365-mcp-server --http 3000 --obo --org-mode --preset dynamics
 
 Dynamics tools are deliberately available only with `--http --obo --org-mode`. Each MCP request is exchanged separately for Graph and Dataverse, using the original caller assertion; one resource token is never sent to the other service.
 
-The `dynamics` preset includes generic metadata, query, get, create, update, and delete tools for standard and custom entity sets. It also includes curated account, contact, lead, and opportunity helpers. Activities are read through `activitypointers`; create helpers target concrete Dataverse entities (`task`, `phonecall`, and `appointment`) rather than a polymorphic activity write endpoint. Custom-table payloads remain tenant-defined passthrough objects.
+The `dynamics` preset includes generic metadata, query, get, create, update, and delete tools for standard and custom entity sets. It also includes curated account, contact, lead, and opportunity helpers. Activities are read through `activitypointers`; audit records are available through read-only `dynamics-list-audits` and `dynamics-get-audit` helpers, subject to the caller's Dynamics security role and organization audit settings. Create helpers target concrete Dataverse entities (`task`, `phonecall`, and `appointment`) rather than a polymorphic activity write endpoint. Custom-table payloads remain tenant-defined passthrough objects.
 
 Dataverse authorizes requests with the caller's own Dynamics security roles. Configure the Entra app with **Dynamics CRM** delegated `user_impersonation`, the needed Microsoft Graph delegated permissions, and tenant-wide admin consent. For OBO, also expose the MCP app's `access_as_user` delegated permission to the MCP client. `--read-only` and `MS365_MCP_REQUIRE_CONFIRM=true` apply to Dynamics writes just as they do to Graph writes.
 
@@ -636,6 +636,8 @@ Environment variables:
 - `MS365_MCP_TENANT_ID`: Custom tenant ID (defaults to 'common' for multi-tenant). **Personal Microsoft accounts should set this to `consumers`** - as of June 2026, refresh tokens issued via the default 'common' authority are rejected at the first refresh, so sessions die roughly an hour after login
 - `MS365_MCP_OAUTH_TOKEN`: Pre-existing OAuth token for Microsoft Graph API (BYOT method)
 - `MS365_MCP_DYNAMICS_URL`: Exact HTTPS Dynamics 365 / Dataverse organization origin, such as `https://contoso.crm.dynamics.com`. Requires `--http --obo --org-mode`; the server rejects paths, query strings, fragments, and credentials.
+- `MS365_MCP_IS_STAGING=true|1`: Marks the deployment as staging. This requires `MS365_MCP_DYNAMICS_STAGING_URL` and overrides `MS365_MCP_DYNAMICS_URL`, including a `--dynamics-url` value, so staging cannot accidentally use the standard Dynamics organization.
+- `MS365_MCP_DYNAMICS_STAGING_URL`: Exact HTTPS Dynamics 365 / Dataverse organization origin to use when `MS365_MCP_IS_STAGING=true|1`.
 - `MS365_MCP_KEYVAULT_URL`: Azure Key Vault URL for secrets management (see Azure Key Vault section)
 - `MS365_MCP_TOKEN_CACHE_PATH`: Custom file path for MSAL token cache (see Token Storage below)
 - `MS365_MCP_SELECTED_ACCOUNT_PATH`: Custom file path for selected account metadata (see Token Storage below)

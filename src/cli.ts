@@ -293,7 +293,22 @@ export function parseArgs(): CommandOptions {
     options.obo = true;
   }
 
-  if (options.dynamicsUrl === undefined && process.env.MS365_MCP_DYNAMICS_URL !== undefined) {
+  const isStagingDeployment =
+    process.env.MS365_MCP_IS_STAGING === 'true' || process.env.MS365_MCP_IS_STAGING === '1';
+  if (isStagingDeployment) {
+    const stagingDynamicsUrl = process.env.MS365_MCP_DYNAMICS_STAGING_URL;
+    if (stagingDynamicsUrl === undefined || stagingDynamicsUrl.trim() === '') {
+      console.error(
+        'Error: MS365_MCP_IS_STAGING=true requires a non-empty MS365_MCP_DYNAMICS_STAGING_URL. ' +
+          'Refusing to fall back to MS365_MCP_DYNAMICS_URL.'
+      );
+      process.exit(1);
+    }
+    options.dynamicsUrl = stagingDynamicsUrl;
+  } else if (
+    options.dynamicsUrl === undefined &&
+    process.env.MS365_MCP_DYNAMICS_URL !== undefined
+  ) {
     options.dynamicsUrl = process.env.MS365_MCP_DYNAMICS_URL;
   }
 

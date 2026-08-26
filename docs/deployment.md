@@ -71,6 +71,13 @@ docker run -p 3000:3000 \
 
 The configured URL must be an HTTPS origin with no path, credentials, query string, or fragment. OBO retains the incoming MCP token as the user assertion and exchanges it independently for Graph and Dataverse `/.default` tokens. Configure the Entra application to expose its `access_as_user` scope, add **Dynamics CRM** delegated `user_impersonation` and the required Microsoft Graph delegated permissions, then grant admin consent. Dataverse security roles continue to govern which records each caller can access or change.
 
+To make the same deployment configuration safe for staging, set both variables below. When `MS365_MCP_IS_STAGING=true` (or `1`), the server uses `MS365_MCP_DYNAMICS_STAGING_URL` and refuses to start if it is absent or empty; it never falls back to `MS365_MCP_DYNAMICS_URL` in staging.
+
+```bash
+-e MS365_MCP_IS_STAGING=true \
+-e MS365_MCP_DYNAMICS_STAGING_URL=https://contoso-staging.crm.dynamics.com
+```
+
 ## Azure Container Apps
 
 > **Turnkey Bicep example**: see [`examples/azure-container-apps/`](../examples/azure-container-apps/) for a complete Bicep template + PowerShell deploy script that provisions Log Analytics, UAMI, Key Vault (RBAC), Container Apps Environment and the Container App in one command.

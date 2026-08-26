@@ -130,6 +130,8 @@ describe('Dynamics tools', () => {
     expect(DYNAMICS_TOOL_PRESETS).toContain('dynamics-create-lead');
     expect(DYNAMICS_TOOL_PRESETS).toContain('dynamics-create-opportunity');
     expect(DYNAMICS_TOOL_PRESETS).toContain('dynamics-list-activities');
+    expect(DYNAMICS_TOOL_PRESETS).toContain('dynamics-list-audits');
+    expect(DYNAMICS_TOOL_PRESETS).toContain('dynamics-get-audit');
     expect(DYNAMICS_TOOL_PRESETS).toContain('dynamics-create-task');
   });
 
@@ -137,6 +139,8 @@ describe('Dynamics tools', () => {
     const client = new DataverseClient(parseDynamicsUrl('https://contoso.crm.dynamics.com')!);
     const tools = createDynamicsTools(client);
     expect(tools.find((tool) => tool.name === 'dynamics-query-records')?.readOnlyHint).toBe(true);
+    expect(tools.find((tool) => tool.name === 'dynamics-list-audits')?.readOnlyHint).toBe(true);
+    expect(tools.find((tool) => tool.name === 'dynamics-get-audit')?.readOnlyHint).toBe(true);
     expect(tools.find((tool) => tool.name === 'dynamics-create-record')?.readOnlyHint).toBe(false);
     expect(tools.every((tool) => tool.orgOnly && tool.service === 'dynamics')).toBe(true);
   });
@@ -151,6 +155,29 @@ describe('Dynamics tools', () => {
 
     expect(client.request).toHaveBeenCalledWith(
       expect.stringContaining('$expand=Attributes(%24select%3DLogicalName)')
+    );
+  });
+
+  it('uses the read-only audits entity set for audit helpers', async () => {
+    const client = {
+      request: vi.fn().mockResolvedValue({ value: [] }),
+    } as unknown as DataverseClient;
+    const tools = createDynamicsTools(client);
+
+    await tools
+      .find((item) => item.name === 'dynamics-list-audits')!
+      .execute({ top: 10, orderby: 'createdon desc' }, {} as UtilityToolContext);
+    await tools
+      .find((item) => item.name === 'dynamics-get-audit')!
+      .execute(
+        { id: '00000000-0000-4000-8000-000000000000', select: 'action,createdon' },
+        {} as UtilityToolContext
+      );
+
+    expect(client.request).toHaveBeenNthCalledWith(1, '/audits?$orderby=createdon%20desc&$top=10');
+    expect(client.request).toHaveBeenNthCalledWith(
+      2,
+      '/audits(00000000-0000-4000-8000-000000000000)?$select=action%2Ccreatedon'
     );
   });
 });
