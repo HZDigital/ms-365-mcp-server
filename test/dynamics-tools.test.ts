@@ -74,6 +74,28 @@ describe('Dataverse client', () => {
     );
   });
 
+  it('requests lookup display labels and target metadata when asked', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ value: [] })));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const client = new DataverseClient(parseDynamicsUrl('https://contoso.crm.dynamics.com')!);
+
+    await requestContext.run({ getAccessToken: async () => 'DYNAMICS_TOKEN' }, () =>
+      client.request('/opportunities?$select=_customerid_value,_responsible1_value', {
+        includeLookupAnnotations: true,
+      })
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Prefer:
+            'odata.include-annotations="OData.Community.Display.V1.FormattedValue,Microsoft.Dynamics.CRM.lookuplogicalname,Microsoft.Dynamics.CRM.associatednavigationproperty"',
+        }),
+      })
+    );
+  });
+
   it('returns entity identity for a 204 mutation response', async () => {
     global.fetch = vi.fn().mockResolvedValue(
       new Response(null, {
@@ -158,6 +180,43 @@ describe('Dynamics tools', () => {
     );
   });
 
+  it('includes lookup annotations by default on record queries', async () => {
+    const client = {
+      request: vi.fn().mockResolvedValue({ value: [] }),
+    } as unknown as DataverseClient;
+    const tool = createDynamicsTools(client).find(
+      (item) => item.name === 'dynamics-query-records'
+    )!;
+
+    await tool.execute(
+      { entity_set: 'opportunities', select: '_customerid_value,_responsible1_value' },
+      {} as UtilityToolContext
+    );
+
+    expect(client.request).toHaveBeenCalledWith(
+      '/opportunities?$select=_customerid_value%2C_responsible1_value',
+      { includeLookupAnnotations: true }
+    );
+  });
+
+  it('allows callers to suppress lookup annotations on record queries', async () => {
+    const client = {
+      request: vi.fn().mockResolvedValue({ value: [] }),
+    } as unknown as DataverseClient;
+    const tool = createDynamicsTools(client).find(
+      (item) => item.name === 'dynamics-query-records'
+    )!;
+
+    await tool.execute(
+      { entity_set: 'opportunities', include_annotations: false },
+      {} as UtilityToolContext
+    );
+
+    expect(client.request).toHaveBeenCalledWith('/opportunities', {
+      includeLookupAnnotations: false,
+    });
+  });
+
   it('uses the read-only audits entity set for audit helpers', async () => {
     const client = {
       request: vi.fn().mockResolvedValue({ value: [] }),
@@ -174,10 +233,13 @@ describe('Dynamics tools', () => {
         {} as UtilityToolContext
       );
 
-    expect(client.request).toHaveBeenNthCalledWith(1, '/audits?$orderby=createdon%20desc&$top=10');
+    expect(client.request).toHaveBeenNthCalledWith(1, '/audits?$orderby=createdon%20desc&$top=10', {
+      includeLookupAnnotations: true,
+    });
     expect(client.request).toHaveBeenNthCalledWith(
       2,
-      '/audits(00000000-0000-4000-8000-000000000000)?$select=action%2Ccreatedon'
+      '/audits(00000000-0000-4000-8000-000000000000)?$select=action%2Ccreatedon',
+      { includeLookupAnnotations: true }
     );
   });
 });

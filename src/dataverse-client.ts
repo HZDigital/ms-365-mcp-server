@@ -7,8 +7,20 @@ export interface DataverseRequestOptions {
   body?: Record<string, unknown>;
   headers?: Record<string, string>;
   preferRepresentation?: boolean;
+  /**
+   * Ask Dataverse to return display labels and type information for lookup
+   * properties. This avoids clients having to guess the target table for a
+   * polymorphic or custom lookup.
+   */
+  includeLookupAnnotations?: boolean;
   accessToken?: string;
 }
+
+const LOOKUP_ANNOTATIONS = [
+  'OData.Community.Display.V1.FormattedValue',
+  'Microsoft.Dynamics.CRM.lookuplogicalname',
+  'Microsoft.Dynamics.CRM.associatednavigationproperty',
+].join(',');
 
 export class DataverseClient {
   constructor(private readonly config: DynamicsConfig) {}
@@ -46,8 +58,8 @@ export class DataverseClient {
     return this.fetch(this.urlFor(path), options);
   }
 
-  async requestNextLink(nextLink: string): Promise<unknown> {
-    return this.fetch(this.urlForNextLink(nextLink), { method: 'GET' });
+  async requestNextLink(nextLink: string, options: DataverseRequestOptions = {}): Promise<unknown> {
+    return this.fetch(this.urlForNextLink(nextLink), { method: 'GET', ...options });
   }
 
   private async fetch(url: string, options: DataverseRequestOptions): Promise<unknown> {
@@ -66,7 +78,14 @@ export class DataverseClient {
       ...options.headers,
     };
     if (options.body !== undefined) headers['Content-Type'] = 'application/json; charset=utf-8';
-    if (options.preferRepresentation) headers.Prefer = 'return=representation';
+    const preferences = [
+      headers.Prefer,
+      ...(options.preferRepresentation ? ['return=representation'] : []),
+      ...(options.includeLookupAnnotations
+        ? [`odata.include-annotations="${LOOKUP_ANNOTATIONS}"`]
+        : []),
+    ].filter((preference): preference is string => Boolean(preference));
+    if (preferences.length > 0) headers.Prefer = preferences.join(',');
 
     const response = await fetchDataverseWithResilience(url, {
       method: options.method ?? 'GET',

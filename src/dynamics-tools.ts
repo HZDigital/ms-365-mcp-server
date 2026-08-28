@@ -11,6 +11,12 @@ const querySchema = {
   expand: z.string().describe('Dataverse OData $expand expression.').optional(),
   orderby: z.string().describe('Dataverse OData $orderby expression.').optional(),
   top: z.number().int().min(1).max(5000).describe('Maximum records to return (1-5000).').optional(),
+  include_annotations: z
+    .boolean()
+    .describe(
+      'Return display labels plus table and navigation metadata for lookup columns. Defaults to true; set false only to reduce response size.'
+    )
+    .optional(),
 };
 
 function textResult(value: unknown): CallToolResult {
@@ -49,6 +55,14 @@ function queryString(params: Record<string, unknown>): string {
 
 function recordPath(set: string, id?: string): string {
   return id === undefined ? `/${set}` : `/${set}(${id})`;
+}
+
+function readRecords(
+  client: DataverseClient,
+  path: string,
+  params: Record<string, unknown> = {}
+): Promise<unknown> {
+  return client.request(path, { includeLookupAnnotations: params.include_annotations !== false });
 }
 
 function coreBody(properties: Record<string, z.ZodTypeAny>, required: string[] = []): z.ZodTypeAny {
@@ -210,7 +224,7 @@ export function createDynamicsTools(client: DataverseClient): readonly UtilityTo
     dynamicsTool(
       'dynamics-query-records',
       'GET',
-      'Query records from any configured Dataverse entity set with constrained OData options.',
+      'Query records from any configured Dataverse entity set with constrained OData options. Lookup columns return their display labels, referenced table, and navigation property by default; use those annotations instead of guessing related master-data tables.',
       () => ({
         entity_set: z
           .string()
@@ -221,7 +235,11 @@ export function createDynamicsTools(client: DataverseClient): readonly UtilityTo
       async (params) => {
         const set = entitySet(params.entity_set);
         return textResult(
-          await client.request(recordPath(set) + queryString(params as Record<string, unknown>))
+          await readRecords(
+            client,
+            recordPath(set) + queryString(params as Record<string, unknown>),
+            params
+          )
         );
       }
     ),
@@ -237,8 +255,10 @@ export function createDynamicsTools(client: DataverseClient): readonly UtilityTo
       async (params) => {
         const set = entitySet(params.entity_set);
         return textResult(
-          await client.request(
-            recordPath(set, recordId(params.id)) + queryString(params as Record<string, unknown>)
+          await readRecords(
+            client,
+            recordPath(set, recordId(params.id)) + queryString(params as Record<string, unknown>),
+            params
           )
         );
       }
@@ -253,7 +273,10 @@ export function createDynamicsTools(client: DataverseClient): readonly UtilityTo
           .url()
           .describe('Exact @odata.nextLink from a previous Dynamics response.'),
       }),
-      async (params) => textResult(await client.requestNextLink(String(params.next_link)))
+      async (params) =>
+        textResult(
+          await client.requestNextLink(String(params.next_link), { includeLookupAnnotations: true })
+        )
     ),
     dynamicsTool(
       'dynamics-create-record',
@@ -320,7 +343,9 @@ export function createDynamicsTools(client: DataverseClient): readonly UtilityTo
         `List Dynamics ${entity.plural} from the configured organization.`,
         () => ({ ...querySchema }),
         async (params) =>
-          textResult(await client.request(`/${entity.entitySet}${queryString(params)}`))
+          textResult(
+            await readRecords(client, `/${entity.entitySet}${queryString(params)}`, params)
+          )
       ),
       dynamicsTool(
         `dynamics-get-${entity.name}`,
@@ -332,8 +357,10 @@ export function createDynamicsTools(client: DataverseClient): readonly UtilityTo
         }),
         async (params) =>
           textResult(
-            await client.request(
-              `${recordPath(entity.entitySet, recordId(params.id))}${queryString(params)}`
+            await readRecords(
+              client,
+              `${recordPath(entity.entitySet, recordId(params.id))}${queryString(params)}`,
+              params
             )
           )
       ),
@@ -392,7 +419,8 @@ export function createDynamicsTools(client: DataverseClient): readonly UtilityTo
       'GET',
       'List polymorphic Dynamics activities using the read-oriented activitypointer table.',
       () => ({ ...querySchema }),
-      async (params) => textResult(await client.request(`/activitypointers${queryString(params)}`))
+      async (params) =>
+        textResult(await readRecords(client, `/activitypointers${queryString(params)}`, params))
     ),
     dynamicsTool(
       'dynamics-get-activity',
@@ -401,8 +429,10 @@ export function createDynamicsTools(client: DataverseClient): readonly UtilityTo
       () => ({ id: z.string().regex(GUID).describe('Dynamics activity GUID.'), ...querySchema }),
       async (params) =>
         textResult(
-          await client.request(
-            `${recordPath('activitypointers', recordId(params.id))}${queryString(params)}`
+          await readRecords(
+            client,
+            `${recordPath('activitypointers', recordId(params.id))}${queryString(params)}`,
+            params
           )
         )
     ),
@@ -411,7 +441,8 @@ export function createDynamicsTools(client: DataverseClient): readonly UtilityTo
       'GET',
       "List Dataverse audit records. Audit access is governed by the caller's Dynamics security role and organization audit settings.",
       () => ({ ...querySchema }),
-      async (params) => textResult(await client.request(`/audits${queryString(params)}`))
+      async (params) =>
+        textResult(await readRecords(client, `/audits${queryString(params)}`, params))
     ),
     dynamicsTool(
       'dynamics-get-audit',
@@ -423,7 +454,11 @@ export function createDynamicsTools(client: DataverseClient): readonly UtilityTo
       }),
       async (params) =>
         textResult(
-          await client.request(`${recordPath('audits', recordId(params.id))}${queryString(params)}`)
+          await readRecords(
+            client,
+            `${recordPath('audits', recordId(params.id))}${queryString(params)}`,
+            params
+          )
         )
     )
   );
