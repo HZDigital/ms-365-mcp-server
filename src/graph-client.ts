@@ -3,12 +3,16 @@ import AuthManager from './auth.js';
 import { encode as toonEncode } from '@toon-format/toon';
 import type { AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
-import { getRequestAccessToken } from './request-context.js';
+import { getRequestTokens } from './request-context.js';
 import {
   fetchWithResilience,
   getSharedBreaker,
   loadResilienceConfig,
 } from './lib/graph-resilience.js';
+import { applyMessageSignoffToRequest } from './lib/message-signoff.js';
+import { TRANSPORT_OK_MESSAGE } from './lib/select-projection.js';
+import { open, stat, unlink } from 'fs/promises';
+import { pipeline } from 'stream/promises';
 
 /**
  * Returns true if the given HTTP Content-Type header indicates a binary
@@ -60,99 +64,8 @@ interface GraphRequestOptions {
   // Pin this response to JSON regardless of the configured format, so the
   // fetchAllPages merge can JSON.parse each page before re-encoding (#560).
   forceJsonOutput?: boolean;
-  // Enforce an upper bound while a response body is streamed. This is used by
-  // server-side document extraction so a stale Graph size value cannot cause
-  // an unbounded base64 buffer to be allocated first.
-  maxResponseBytes?: number;
-  // Bounds the full Graph operation, including headers and body streaming. A
-  // bounded request disables retries so its deadline cannot multiply per try.
-  maxResponseDurationMs?: number;
 
   [key: string]: unknown;
-}
-
-async function cancelResponseBody(response: Response): Promise<void> {
-  try {
-    await response.body?.cancel();
-  } catch {
-    // Best effort: the caller is already reporting the original limit error.
-  }
-}
-
-async function readResponseBytes(
-  response: Response,
-  maxBytes?: number,
-  maxDurationMs?: number
-): Promise<Buffer> {
-  if (maxDurationMs !== undefined && maxDurationMs <= 0) {
-    await cancelResponseBody(response);
-    throw new Error(
-      `Microsoft Graph response did not finish within the configured ${maxDurationMs} ms limit.`
-    );
-  }
-
-  const contentLength = response.headers.get('content-length');
-  if (maxBytes !== undefined && contentLength) {
-    const declaredBytes = Number.parseInt(contentLength, 10);
-    if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
-      await cancelResponseBody(response);
-      throw new Error(
-        `Microsoft Graph response is ${declaredBytes} bytes, exceeding the configured limit of ${maxBytes} bytes.`
-      );
-    }
-  }
-
-  const reader = response.body?.getReader();
-  if (!reader) return Buffer.alloc(0);
-
-  const chunks: Uint8Array[] = [];
-  let totalBytes = 0;
-  let timedOut = false;
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise =
-    maxDurationMs === undefined
-      ? undefined
-      : new Promise<never>((_, reject) => {
-          timeout = setTimeout(() => {
-            timedOut = true;
-            reject(
-              new Error(
-                `Microsoft Graph response did not finish within the configured ${maxDurationMs} ms limit.`
-              )
-            );
-            void reader.cancel();
-          }, maxDurationMs);
-        });
-
-  try {
-    while (true) {
-      const next = timeoutPromise
-        ? await Promise.race([reader.read(), timeoutPromise])
-        : await reader.read();
-      if (next.done) break;
-
-      totalBytes += next.value.byteLength;
-      if (maxBytes !== undefined && totalBytes > maxBytes) {
-        void reader.cancel();
-        throw new Error(
-          `Microsoft Graph response exceeds the configured limit of ${maxBytes} bytes.`
-        );
-      }
-      chunks.push(next.value);
-    }
-  } catch (error) {
-    if (timedOut) {
-      throw new Error(
-        `Microsoft Graph response did not finish within the configured ${maxDurationMs} ms limit.`
-      );
-    }
-    throw error;
-  } finally {
-    if (timeout) clearTimeout(timeout);
-    reader.releaseLock();
-  }
-
-  return Buffer.concat(chunks, totalBytes);
 }
 
 interface ContentItem {
@@ -168,6 +81,100 @@ interface McpResponse {
   isError?: boolean;
 
   [key: string]: unknown;
+}
+
+interface GraphResponseMetadata {
+  http_status: number;
+  error_code?: string;
+  graph_batch_subrequest_count?: number;
+  graph_batch_http_status_counts?: Record<string, number>;
+  graph_batch_error_code_counts?: Record<string, number>;
+}
+
+interface GraphRequestResult {
+  data: unknown;
+  metadata: GraphResponseMetadata;
+}
+
+export interface GraphDownloadResult {
+  contentType: string;
+  contentLength: number;
+  httpStatus: number;
+}
+
+export class GraphApiError extends Error {
+  readonly httpStatus: number;
+  readonly graphErrorCode?: string;
+
+  constructor(message: string, httpStatus: number, graphErrorCode?: string) {
+    super(message);
+    this.name = 'GraphApiError';
+    this.httpStatus = httpStatus;
+    this.graphErrorCode = graphErrorCode;
+  }
+}
+
+function extractGraphErrorCode(errorText: string): string | undefined {
+  try {
+    const body = JSON.parse(errorText) as { error?: { code?: unknown }; code?: unknown };
+    const code = body.error?.code ?? body.code;
+    return typeof code === 'string' ? code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function definedMetadata(metadata: Partial<GraphResponseMetadata>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(metadata).filter(([, value]) => value !== undefined)
+  ) as Record<string, unknown>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function incrementCount(counts: Record<string, number>, key: string): void {
+  counts[key] = (counts[key] ?? 0) + 1;
+}
+
+function extractGraphErrorCodeFromBody(body: unknown): string | undefined {
+  if (!isRecord(body)) return undefined;
+  const error = body.error;
+  const code = isRecord(error) ? error.code : body.code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+function extractBatchMetadata(data: unknown): Partial<GraphResponseMetadata> {
+  if (!isRecord(data) || !Array.isArray(data.responses)) return {};
+
+  const httpStatusCounts: Record<string, number> = {};
+  const errorCodeCounts: Record<string, number> = {};
+
+  for (const item of data.responses) {
+    if (!isRecord(item)) continue;
+    const status = item.status;
+    if (typeof status !== 'number' || !Number.isInteger(status)) continue;
+
+    incrementCount(httpStatusCounts, String(status));
+
+    if (status >= 400) {
+      const errorCode = extractGraphErrorCodeFromBody(item.body);
+      if (errorCode) {
+        incrementCount(errorCodeCounts, errorCode);
+      }
+    }
+  }
+
+  return {
+    graph_batch_subrequest_count: data.responses.length,
+    ...(Object.keys(httpStatusCounts).length > 0
+      ? { graph_batch_http_status_counts: httpStatusCounts }
+      : {}),
+    ...(Object.keys(errorCodeCounts).length > 0
+      ? { graph_batch_error_code_counts: errorCodeCounts }
+      : {}),
+  };
 }
 
 class GraphClient {
@@ -186,50 +193,35 @@ class GraphClient {
   }
 
   async makeRequest(endpoint: string, options: GraphRequestOptions = {}): Promise<unknown> {
+    return (await this.makeRequestWithMetadata(endpoint, options)).data;
+  }
+
+  private async makeRequestWithMetadata(
+    endpoint: string,
+    options: GraphRequestOptions = {}
+  ): Promise<GraphRequestResult> {
+    const contextTokens = getRequestTokens();
     const accessToken =
-      options.accessToken ??
-      (await getRequestAccessToken('graph')) ??
-      (await this.authManager.getToken());
+      options.accessToken ?? contextTokens?.accessToken ?? (await this.authManager.getToken());
 
     if (!accessToken) {
       throw new Error('No access token available');
     }
 
     try {
-      const requestStartedAt = Date.now();
       const response = await this.performRequest(endpoint, accessToken, options);
 
-      const needsBoundedRead =
-        options.maxResponseBytes !== undefined || options.maxResponseDurationMs !== undefined;
-      const remainingDurationMs =
-        options.maxResponseDurationMs === undefined
-          ? undefined
-          : options.maxResponseDurationMs - (Date.now() - requestStartedAt);
-      const responseBytes = needsBoundedRead
-        ? await readResponseBytes(response, options.maxResponseBytes, remainingDurationMs)
-        : undefined;
-      const responseText = () => (responseBytes ? responseBytes.toString('utf8') : response.text());
-
       if (response.status === 403) {
-        const errorText = await responseText();
-        if (errorText.includes('scope') || errorText.includes('permission')) {
-          throw new Error(
-            `Microsoft Graph API scope error: ${response.status} ${response.statusText} - ${errorText}. This tool requires organization mode. Please restart with --org-mode flag.`
-          );
-        }
-        throw new Error(
-          `Microsoft Graph API error: ${response.status} ${response.statusText} - ${errorText}`
-        );
+        throw await this.createGraphApiError(response);
       }
 
       if (!response.ok) {
-        throw new Error(
-          `Microsoft Graph API error: ${response.status} ${response.statusText} - ${await responseText()}`
-        );
+        throw await this.createGraphApiError(response);
       }
 
       const contentTypeHeader = response.headers?.get?.('content-type') || '';
       const isBinaryResponse = isBinaryContentType(contentTypeHeader);
+      let metadata: GraphResponseMetadata = { http_status: response.status };
 
       let result: any;
 
@@ -238,32 +230,36 @@ class GraphClient {
         // decoded with response.text() — that performs a lossy UTF-8 decode and
         // replaces every high byte with U+FFFD, destroying the file. Read the
         // raw bytes and return them as base64 so callers can reconstruct them.
-        const buffer = responseBytes ?? Buffer.from(await response.arrayBuffer());
+        const buffer = Buffer.from(await response.arrayBuffer());
         result = {
-          message: 'OK!',
+          message: TRANSPORT_OK_MESSAGE,
           contentType: contentTypeHeader,
           encoding: 'base64',
           contentLength: buffer.byteLength,
           contentBytes: buffer.toString('base64'),
         };
       } else {
-        const text = responseBytes ? responseBytes.toString('utf8') : await response.text();
+        const text = await response.text();
 
         if (text === '') {
-          result = { message: 'OK!' };
+          result = { message: TRANSPORT_OK_MESSAGE };
         } else if (options.rawResponse) {
           // download-bytes on /content wants the body verbatim. A JSON body
           // would otherwise round-trip through JSON.parse -> JSON.stringify,
           // which is lossy (whitespace, trailing newline, key order, number
           // formatting). Return the raw text instead. (issue #546)
-          result = { message: 'OK!', rawResponse: text };
+          result = { message: TRANSPORT_OK_MESSAGE, rawResponse: text };
         } else {
           try {
             result = JSON.parse(text);
           } catch {
-            result = { message: 'OK!', rawResponse: text };
+            result = { message: TRANSPORT_OK_MESSAGE, rawResponse: text };
           }
         }
+      }
+
+      if (endpoint === '/$batch') {
+        metadata = { ...metadata, ...extractBatchMetadata(result) };
       }
 
       // If includeHeaders is requested, add response headers to the result
@@ -273,17 +269,173 @@ class GraphClient {
         // Simple approach: just add ETag to the result if it's an object
         if (result && typeof result === 'object' && !Array.isArray(result)) {
           return {
-            ...result,
-            _etag: etag || 'no-etag-found',
+            data: {
+              ...result,
+              _etag: etag || 'no-etag-found',
+            },
+            metadata,
           };
         }
       }
 
-      return result;
+      return { data: result, metadata };
     } catch (error) {
       logger.error('Microsoft Graph API request failed:', error);
       throw error;
     }
+  }
+
+  /**
+   * Stream Graph byte content straight to a file, without holding the whole
+   * payload in memory. download-bytes-to-file uses this for big mail attachments
+   * and meeting recordings, where makeRequest's base64 buffering would blow up
+   * memory or hit V8's max string length. Creates the file with wx + 0o600 (never
+   * overwrites) and removes a partial file if the transfer fails.
+   */
+  /**
+   * Fetch Graph binary content and hand back the undrained response stream.
+   *
+   * Same auth, same resilience and the same error mapping as `downloadToFile`,
+   * which is the reason this exists rather than the attachment route calling
+   * `fetch` for itself: token acquisition, the OBO/bearer context tokens, retry
+   * and the 403-scope special case are all in `performRequest`, which is
+   * private. Splitting them would give the route a second, quietly divergent
+   * copy of the auth path.
+   *
+   * The caller owns the body from here and MUST consume or cancel it -- an
+   * abandoned stream holds a socket open until the agent times out.
+   */
+  async downloadStream(
+    endpoint: string,
+    options: Pick<GraphRequestOptions, 'accessToken' | 'apiVersion'> = {}
+  ): Promise<{
+    body: NonNullable<Response['body']>;
+    contentType: string;
+    contentLength: number | null;
+    contentDisposition: string | null;
+  }> {
+    const contextTokens = getRequestTokens();
+    const accessToken =
+      options.accessToken ?? contextTokens?.accessToken ?? (await this.authManager.getToken());
+    if (!accessToken) {
+      throw new Error('No access token available');
+    }
+
+    const response = await this.performRequest(endpoint, accessToken, options);
+    if (response.status === 403) {
+      const errorText = await response.text();
+      if (errorText.includes('scope') || errorText.includes('permission')) {
+        throw new Error(
+          `Microsoft Graph API scope error: ${response.status} ${response.statusText} - ${errorText}. This tool requires organization mode. Please restart with --org-mode flag.`
+        );
+      }
+      throw new Error(
+        `Microsoft Graph API error: ${response.status} ${response.statusText} - ${errorText}`
+      );
+    }
+    if (!response.ok) {
+      throw new Error(
+        `Microsoft Graph API error: ${response.status} ${response.statusText} - ${await response.text()}`
+      );
+    }
+    if (!response.body) {
+      throw new Error('Microsoft Graph returned an empty response body');
+    }
+
+    // Absent is null, and `Number(null)` is 0, which `Number.isFinite` accepts -- so
+    // reading this with Number() alone reports a length of zero for a response that has
+    // one and simply did not declare it, and the route then sends `content-length: 0`
+    // ahead of a body it goes on to stream. Only an actual digit string is a length.
+    const rawLength = response.headers.get('content-length');
+    // fetch requests gzip by default and undici decodes the body, but leaves the header at
+    // the *compressed* size. Forwarding that caps the response short of the bytes actually
+    // being streamed, and the peer sees a 200 with a truncated file and no error anywhere,
+    // so a declared length is only usable when the body was not decoded on the way in.
+    const decoded = response.headers.get('content-encoding') !== null;
+    const declaredLength = !decoded && rawLength !== null && /^\d+$/.test(rawLength.trim());
+    return {
+      body: response.body,
+      contentType: response.headers.get('content-type') || 'application/octet-stream',
+      contentLength: declaredLength ? Number(rawLength) : null,
+      contentDisposition: response.headers.get('content-disposition'),
+    };
+  }
+
+  async downloadToFile(
+    endpoint: string,
+    destinationPath: string,
+    options: Pick<GraphRequestOptions, 'accessToken' | 'apiVersion'> = {}
+  ): Promise<GraphDownloadResult> {
+    const fileHandle = await open(destinationPath, 'wx', 0o600);
+    let completed = false;
+
+    try {
+      const contextTokens = getRequestTokens();
+      const accessToken =
+        options.accessToken ?? contextTokens?.accessToken ?? (await this.authManager.getToken());
+      if (!accessToken) {
+        throw new Error('No access token available');
+      }
+
+      const response = await this.performRequest(endpoint, accessToken, options);
+      if (response.status === 403) {
+        throw await this.createGraphApiError(response);
+      }
+      if (!response.ok) {
+        throw await this.createGraphApiError(response);
+      }
+      if (!response.body) {
+        throw new Error('Microsoft Graph returned an empty response body');
+      }
+
+      await pipeline(response.body, fileHandle.createWriteStream());
+      // Bytes are on disk now - a stat() hiccup past here must not delete them
+      // (that also blocks a retry, since we never overwrite).
+      completed = true;
+
+      let contentLength: number;
+      try {
+        contentLength = (await stat(destinationPath)).size;
+      } catch {
+        const header = Number(response.headers.get('content-length'));
+        contentLength = Number.isFinite(header) ? header : 0;
+      }
+
+      return {
+        contentType: response.headers.get('content-type') || 'application/octet-stream',
+        contentLength,
+        httpStatus: response.status,
+      };
+    } catch (error) {
+      logger.error('Microsoft Graph file download failed:', error);
+      throw error;
+    } finally {
+      await fileHandle.close().catch(() => undefined);
+      if (!completed) {
+        await unlink(destinationPath).catch(() => undefined);
+      }
+    }
+  }
+
+  private async createGraphApiError(response: Response): Promise<GraphApiError> {
+    const errorText = await response.text();
+    const graphErrorCode = extractGraphErrorCode(errorText);
+    const isPermissionOrScopeError =
+      errorText.includes('scope') || errorText.includes('permission');
+
+    if (response.status === 403 && isPermissionOrScopeError) {
+      return new GraphApiError(
+        `Microsoft Graph API scope error: ${response.status} ${response.statusText} - ${errorText}. This tool requires organization mode. Please restart with --org-mode flag.`,
+        response.status,
+        graphErrorCode
+      );
+    }
+
+    return new GraphApiError(
+      `Microsoft Graph API error: ${response.status} ${response.statusText} - ${errorText}`,
+      response.status,
+      graphErrorCode
+    );
   }
 
   private async performRequest(
@@ -297,41 +449,29 @@ class GraphClient {
 
     logger.info(`[GRAPH CLIENT] Final URL being sent to Microsoft: ${url}`);
 
+    const method = options.method || 'GET';
+    // Signoff gate sits at the outbound chokepoint, keyed on method + path, so
+    // every route to a message write - tool aliases, PATCH edits and $batch
+    // sub-requests alike - passes through it.
+    const body = applyMessageSignoffToRequest(method, endpoint, options.body);
+
     const headers: Record<string, string> = {
       Authorization: `Bearer ${accessToken}`,
       'Content-Type': 'application/json',
       ...options.headers,
     };
 
-    const resilienceConfig = loadResilienceConfig();
-    if (options.maxResponseDurationMs !== undefined) {
-      resilienceConfig.fetchTimeoutMs = Math.min(
-        resilienceConfig.fetchTimeoutMs,
-        options.maxResponseDurationMs
-      );
-      resilienceConfig.maxRetries = 0;
-    }
-
-    try {
-      return await fetchWithResilience(
-        url,
-        {
-          method: options.method || 'GET',
-          headers,
-          // Node's fetch accepts Buffer/Uint8Array; TS BodyInit doesn't.
-          body: options.body as unknown as string,
-        },
-        resilienceConfig,
-        getSharedBreaker()
-      );
-    } catch (error) {
-      if (options.maxResponseDurationMs !== undefined && (error as Error).name === 'AbortError') {
-        throw new Error(
-          `Microsoft Graph response did not finish within the configured ${options.maxResponseDurationMs} ms limit.`
-        );
-      }
-      throw error;
-    }
+    return fetchWithResilience(
+      url,
+      {
+        method,
+        headers,
+        // Node's fetch accepts Buffer/Uint8Array; TS BodyInit doesn't.
+        body: body as unknown as string,
+      },
+      loadResilienceConfig(),
+      getSharedBreaker()
+    );
   }
 
   private serializeData(data: unknown, outputFormat: 'json' | 'toon', pretty = false): string {
@@ -357,28 +497,54 @@ class GraphClient {
 
   async graphRequest(endpoint: string, options: GraphRequestOptions = {}): Promise<McpResponse> {
     try {
-      logger.info(`Calling ${endpoint} with options: ${JSON.stringify(options)}`);
+      // Redact accessToken from log output to prevent credential leakage (#601)
+      const { accessToken: _redacted, ...safeOptions } = options;
+      logger.info(
+        `Calling ${endpoint} with options: ${JSON.stringify(safeOptions)}${_redacted ? ' [accessToken=REDACTED]' : ''}`
+      );
 
       // Use new OAuth-aware request method
-      const result = await this.makeRequest(endpoint, options);
+      const { data, metadata } = await this.makeRequestWithMetadata(endpoint, options);
 
       // forceJsonOutput keeps this body JSON so the fetchAllPages merge can parse
       // it; otherwise --toon would make the merge's JSON.parse throw (#560).
       const outputFormat = options.forceJsonOutput ? 'json' : this.outputFormat;
 
-      return this.formatJsonResponse(
-        result,
-        options.rawResponse,
-        options.excludeResponse,
-        outputFormat
+      return this.withResponseMetadata(
+        this.formatJsonResponse(data, options.rawResponse, options.excludeResponse, outputFormat),
+        metadata
       );
     } catch (error) {
       logger.error(`Error in Graph API request: ${error}`);
+      const metadata =
+        error instanceof GraphApiError
+          ? definedMetadata({
+              http_status: error.httpStatus,
+              error_code: error.graphErrorCode,
+            })
+          : undefined;
       return {
         content: [{ type: 'text', text: JSON.stringify({ error: (error as Error).message }) }],
         isError: true,
+        ...(metadata && Object.keys(metadata).length > 0 ? { _meta: metadata } : {}),
       };
     }
+  }
+
+  private withResponseMetadata(
+    response: McpResponse,
+    metadata: Partial<GraphResponseMetadata>
+  ): McpResponse {
+    const cleanMetadata = definedMetadata(metadata);
+    if (Object.keys(cleanMetadata).length === 0) return response;
+
+    return {
+      ...response,
+      _meta: {
+        ...response._meta,
+        ...cleanMetadata,
+      },
+    };
   }
 
   formatJsonResponse(

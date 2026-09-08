@@ -13,7 +13,7 @@ function buildGeneralMcpInstructions(opts: McpInstructionsContext): string {
     'When you need an organizational user or recipient address, resolve it with list-users (or another directory tool); do not invent SMTP addresses.',
     'Directory $search on collections such as /users or /groups requires ConsistencyLevel: eventual when the tool exposes that header.',
     'Teams chat and channel messages: prefer HTML contentType in the body; plain text is often mangled by Graph.',
-    'Files / binary content: for large drive/SharePoint file content, prefer get-download-url to resolve a pre-authenticated URL for out-of-band download. Use download-bytes for authenticated byte reads such as mail attachments, profile photos, Teams hosted content, and meeting recordings. Both tools take relative Microsoft Graph paths, not absolute URLs. For uploads, upload-file-content takes a base64 string body up to 4MB; use create-upload-session above that.',
+    'Files / binary content: for large drive/SharePoint file content, prefer get-download-url to resolve a pre-authenticated URL for out-of-band download. Use download-bytes for authenticated byte reads such as mail attachments, profile photos, Teams hosted content, and meeting recordings. In stdio mode, download-bytes-to-file writes those same authenticated bytes straight to a local absolute path instead of returning base64 — the only out-of-band option for large mail attachments and meeting recordings, which get-download-url cannot handle. These tools take relative Microsoft Graph paths, not absolute URLs. For uploads, upload-file-content takes a base64 string body (Graph allows 250MB, but the whole string passes through the agent context and a truncated one is written without error); use create-upload-session for anything but small files.',
     'Dynamics tools use one deployment-configured Dataverse organization. Use dynamics-list-tables and dynamics-get-table-metadata before querying custom tables. Generic Dynamics entity_set values are entity-set names, not URLs; activity writes use concrete task, phonecall, or appointment tools.',
   ];
   if (opts.readOnly) parts.push('This server is read-only; write operations are disabled.');
@@ -25,11 +25,11 @@ function buildGeneralMcpInstructions(opts: McpInstructionsContext): string {
 }
 
 const DISCOVERY_MODE_INSTRUCTIONS_ADDON =
-  'DISCOVERY MODE ADD-ON: Service tools are reached via search-tools → get-tool-schema → execute-tool (plus auth helpers). ' +
+  'DISCOVERY MODE ADD-ON: Graph is reached via search-tools → get-tool-schema → execute-tool (plus auth helpers). ' +
   'Workflow: (1) call search-tools with short natural-language keywords (BM25-ranked); ' +
   '(2) call get-tool-schema(tool_name) to see the parameters, required fields, and enum values; ' +
   '(3) call execute-tool with tool_name exactly as returned and parameters shaped per the schema. ' +
-  'Skipping get-tool-schema is the leading cause of request validation errors here. ' +
+  'Skipping get-tool-schema is the leading cause of Graph 400 errors here. ' +
   'If search-tools returns no matches, retry with shorter or different keywords.';
 
 /**
