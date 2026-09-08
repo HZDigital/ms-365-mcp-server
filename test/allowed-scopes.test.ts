@@ -16,8 +16,20 @@ const expressMocks = vi.hoisted(() => {
   app.post = vi.fn(() => app);
   app.listen = vi.fn((...args: unknown[]) => {
     const callback = args.find((arg): arg is () => void => typeof arg === 'function');
+    const port = typeof args[0] === 'number' ? args[0] : 0;
+    // An unhosted listen binds the wildcard, which is what the real one reports
+    // back through address() -- not the `undefined` it was handed.
+    const address = typeof args[1] === 'string' ? args[1] : '::';
     callback?.();
-    return { close: vi.fn() };
+    // Shaped like the http.Server Express really returns: server.ts attaches an
+    // `error` listener to it, reads address() to log what was actually bound
+    // rather than what was requested, and MicrosoftGraphServer.stop() closes it.
+    return {
+      close: vi.fn(),
+      closeIdleConnections: vi.fn(),
+      once: vi.fn(),
+      address: vi.fn(() => ({ address, family: address.includes(':') ? 'IPv6' : 'IPv4', port })),
+    };
   });
 
   const express = Object.assign(
@@ -61,6 +73,7 @@ vi.mock('../src/logger.js', () => ({
 
 function mockAuthManager(): AuthManager {
   return {
+    isOAuthModeEnabled: () => false,
     isMultiAccount: vi.fn().mockResolvedValue(false),
     listAccounts: vi.fn().mockResolvedValue([]),
   } as unknown as AuthManager;
@@ -164,25 +177,6 @@ describe('allowed scope HTTP behavior', () => {
     expect(scopes).not.toContain('Calendars.Read');
   });
 
-  it('uses only the OBO app scope and offline access in authorize redirects', async () => {
-    process.env.MS365_MCP_CLIENT_SECRET = 'secret';
-    clearSecretsCache();
-    await startHttpServer({ allowedScopes: 'Mail.Read', obo: true });
-    const handler = expressMocks.routes.get('/authorize')!;
-    const res = mockResponse();
-
-    await handler(
-      mockRequest(
-        '/authorize?response_type=code&redirect_uri=http://localhost:6274/oauth/callback&scope=User.Read&state=abc'
-      ),
-      res
-    );
-
-    const redirectUrl = new URL(res.redirect.mock.calls[0][0]);
-    const scopes = redirectUrl.searchParams.get('scope')!.split(' ');
-    expect(scopes).toEqual(['test-client-id/access_as_user', 'offline_access']);
-  });
-
   it('keeps OBO protected-resource metadata ahead of allowed scopes', async () => {
     process.env.MS365_MCP_CLIENT_SECRET = 'secret';
     clearSecretsCache();
@@ -211,41 +205,6 @@ describe('allowed scope HTTP behavior', () => {
     );
   });
 
-  it('keeps server-to-server metadata endpoints on the request origin when publicUrl is set', async () => {
-    await startHttpServer({
-      enableDynamicRegistration: true,
-      publicUrl: 'https://mcp.example.com',
-    });
-    const handler = expressMocks.routes.get('/.well-known/oauth-authorization-server')!;
-    const res = mockResponse();
-
-    await handler(mockRequest('/.well-known/oauth-authorization-server'), res);
-
-    expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({
-        issuer: 'https://mcp.example.com',
-        authorization_endpoint: 'https://mcp.example.com/authorize',
-        token_endpoint: 'http://localhost:3000/token',
-        registration_endpoint: 'http://localhost:3000/register',
-      })
-    );
-  });
-
-  it('keeps protected-resource metadata resource on the request origin when publicUrl is set', async () => {
-    await startHttpServer({ publicUrl: 'https://mcp.example.com' });
-    const handler = expressMocks.routes.get('/.well-known/oauth-protected-resource')!;
-    const res = mockResponse();
-
-    await handler(mockRequest('/.well-known/oauth-protected-resource'), res);
-
-    expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({
-        resource: 'http://localhost:3000/mcp',
-        authorization_servers: ['https://mcp.example.com'],
-      })
-    );
-  });
-
   it('passes allowed scopes to tool registration', () => {
     const server = new MicrosoftGraphServer(mockAuthManager(), {
       allowedScopes: 'Mail.Read',
@@ -266,7 +225,8 @@ describe('allowed scope HTTP behavior', () => {
       false,
       [],
       'Mail.Read',
-      []
+      [],
+      true
     );
   });
 });

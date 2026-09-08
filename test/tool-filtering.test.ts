@@ -6,6 +6,7 @@ import GraphClient from '../src/graph-client.js';
 vi.mock('../src/logger.js', () => ({
   default: {
     info: vi.fn(),
+    warn: vi.fn(),
     error: vi.fn(),
   },
 }));
@@ -57,8 +58,9 @@ describe('Tool Filtering', () => {
     registerGraphTools(server, graphClient, false);
 
     // 5 mocked graph endpoints via registerTool; utilities via tool
+    // (parse-teams-url, download-bytes, download-bytes-to-file, get-download-url)
     expect(registerToolSpy).toHaveBeenCalledTimes(5);
-    expect(toolSpy).toHaveBeenCalledTimes(3);
+    expect(toolSpy).toHaveBeenCalledTimes(4);
     expect(registerToolSpy).toHaveBeenCalledWith(
       'list-mail-messages',
       expect.any(Object),
@@ -123,7 +125,7 @@ describe('Tool Filtering', () => {
 
     // 5 mocked endpoints + utilities (no filter applied on invalid regex)
     expect(registerToolSpy).toHaveBeenCalledTimes(5);
-    expect(toolSpy).toHaveBeenCalledTimes(3);
+    expect(toolSpy).toHaveBeenCalledTimes(4);
   });
 
   it('should combine read-only and filtering correctly', () => {

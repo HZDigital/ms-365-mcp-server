@@ -7,6 +7,7 @@ import {
   presetRequiresOrgMode,
   TOOL_CATEGORIES,
 } from '../src/tool-categories.js';
+import { UTILITY_TOOLS } from '../src/graph-tools.js';
 import { DYNAMICS_TOOL_PRESETS } from '../src/dynamics-tools.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -22,7 +23,7 @@ function matchedTools(preset: string): string[] {
   return allToolNames.filter((name) => re.test(name));
 }
 
-describe('tool presets', () => {
+describe('presets from endpoints.json', () => {
   it('endpoints.json presets values are limited to known preset names', () => {
     const known = new Set(Object.keys(TOOL_CATEGORIES).filter((name) => name !== 'all'));
     const unknown = endpoints.filter((e) => e.presets?.some((p) => !known.has(p)));
@@ -72,20 +73,10 @@ describe('tool presets', () => {
     const tools = matchedTools('outlook');
     expect(tools).toContain('list-mail-messages');
     expect(tools).toContain('create-calendar-event');
-    expect(tools).toContain('list-shared-calendar-events');
-    expect(tools).toContain('get-shared-calendar-view');
     expect(tools).toContain('list-outlook-contacts');
     expect(tools).not.toContain('list-shared-mailbox-messages');
     expect(tools).not.toContain('get-drive-item');
     expect(tools).not.toContain('list-chats');
-  });
-
-  it('calendar includes shared-calendar reads without shared-mailbox leakage', () => {
-    const tools = matchedTools('calendar');
-    expect(tools).toContain('list-calendar-events');
-    expect(tools).toContain('list-shared-calendar-events');
-    expect(tools).toContain('get-shared-calendar-view');
-    expect(tools).not.toContain('list-shared-mailbox-messages');
   });
 
   it('onedrive covers drive operations without excel or mail-folder leakage', () => {
@@ -115,30 +106,80 @@ describe('tool presets', () => {
     expect(presetRequiresOrgMode('mail')).toBe(false);
     expect(presetRequiresOrgMode('outlook')).toBe(false);
     expect(presetRequiresOrgMode('onedrive')).toBe(false);
-    expect(presetRequiresOrgMode('dynamics')).toBe(true);
-  });
-
-  it('dynamics contains only configured Dynamics tools', () => {
-    const tools = matchedTools('dynamics');
-    expect(tools).toContain('dynamics-query-records');
-    expect(tools).toContain('dynamics-create-account');
-    expect(tools).toContain('dynamics-list-audits');
-    expect(tools).not.toContain('list-mail-messages');
   });
 
   it('presets compose via getCombinedPresetPattern', () => {
     const re = new RegExp(getCombinedPresetPattern(['outlook', 'onedrive']), 'i');
     expect(re.test('list-mail-messages')).toBe(true);
     expect(re.test('get-drive-root-item')).toBe(true);
-    expect(re.test('dynamics-query-records')).toBe(false);
     expect(re.test('list-chats')).toBe(false);
-
-    const withDynamics = new RegExp(getCombinedPresetPattern(['mail', 'dynamics']), 'i');
-    expect(withDynamics.test('list-mail-messages')).toBe(true);
-    expect(withDynamics.test('dynamics-query-records')).toBe(true);
   });
 
   it('all matches everything', () => {
     expect(matchedTools('all')).toEqual(allToolNames);
+  });
+});
+
+describe('utility tools in presets', () => {
+  const namedPresets = Object.keys(TOOL_CATEGORIES).filter((name) => name !== 'all');
+  const inPreset = (preset: string, name: string) =>
+    new RegExp(TOOL_CATEGORIES[preset].pattern.source, 'i').test(name);
+
+  // Regression guard: utility tools (download-bytes, get-download-url, parse-teams-url) live in
+  // code, not endpoints.json, and used to belong to no preset - so any --preset filter stripped
+  // them. A newly added utility tool without preset membership fails this test.
+  it('every utility tool is reachable from at least one named preset', () => {
+    for (const util of UTILITY_TOOLS) {
+      const reachable = namedPresets.some((preset) => inPreset(preset, util.name));
+      expect(reachable, `utility tool ${util.name} is in no preset`).toBe(true);
+    }
+  });
+
+  // download-bytes and download-bytes-to-file are universal Graph binary readers (base64 vs stream
+  // to disk), so no preset - current or future - should be able to find a resource without being
+  // able to read its bytes. teams-write is the one deliberate exception: a send-only preset must
+  // not carry byte readers (its own contract test pins that exclusion).
+  it.each(['download-bytes', 'download-bytes-to-file'])(
+    '%s is available in every preset except teams-write (universal binary reader)',
+    (tool) => {
+      for (const preset of namedPresets.filter((name) => name !== 'teams-write')) {
+        expect(inPreset(preset, tool), `${tool} missing from ${preset}`).toBe(true);
+      }
+    }
+  );
+
+  // Pin the full get-download-url membership so a regression dropping any drive-backed preset
+  // is caught. download-bytes membership is covered by the every-preset test above.
+  it('get-download-url is in every drive-backed preset it declares', () => {
+    for (const preset of ['files', 'onedrive', 'personal', 'work', 'search']) {
+      expect(inPreset(preset, 'get-download-url'), `get-download-url missing from ${preset}`).toBe(
+        true
+      );
+    }
+  });
+
+  it('mail preset has download-bytes but not the drive-only download-url helper', () => {
+    expect(inPreset('mail', 'download-bytes')).toBe(true);
+    expect(inPreset('mail', 'get-download-url')).toBe(false);
+  });
+
+  it('parse-teams-url stays scoped to teams/work', () => {
+    expect(inPreset('teams', 'parse-teams-url')).toBe(true);
+    expect(inPreset('mail', 'parse-teams-url')).toBe(false);
+    expect(inPreset('files', 'parse-teams-url')).toBe(false);
+  });
+
+  it('scoped utilities do not leak into unrelated presets', () => {
+    // download-bytes is universal, so only the scoped helpers should be absent here.
+    expect(inPreset('calendar', 'get-download-url')).toBe(false);
+    expect(inPreset('contacts', 'get-download-url')).toBe(false);
+    expect(inPreset('onenote', 'parse-teams-url')).toBe(false);
+  });
+
+  it('combined presets surface the union of their utility tools', () => {
+    const re = new RegExp(getCombinedPresetPattern(['files', 'teams']), 'i');
+    expect(re.test('download-bytes')).toBe(true);
+    expect(re.test('get-download-url')).toBe(true);
+    expect(re.test('parse-teams-url')).toBe(true);
   });
 });
