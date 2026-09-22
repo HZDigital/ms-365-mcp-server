@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createOboRequestContext,
+  createValidatedOboRequestContext,
+  getRequestAccessToken,
+  getRequestAuditToken,
   getRequestTokens,
   requestContext,
 } from '../src/request-context.js';
@@ -90,6 +93,58 @@ describe('request-context', () => {
     await expect(context.getAccessToken!('graph')).resolves.toBe('recovered-token');
     expect(attempts).toBe(2);
   });
+
+  it('uses per-resource OBO tokens while retaining the assertion for auditing', async () => {
+    const exchange = vi.fn(async (resource: 'graph' | 'dynamics') => `${resource}-token`);
+    const context = createOboRequestContext('incoming-assertion', exchange);
+
+    const result = await requestContext.run(context, async () => ({
+      graph: await getRequestAccessToken('graph'),
+      dynamics: await getRequestAccessToken('dynamics'),
+      audit: getRequestAuditToken(),
+    }));
+
+    expect(result).toEqual({
+      graph: 'graph-token',
+      dynamics: 'dynamics-token',
+      audit: 'incoming-assertion',
+    });
+    expect(exchange).toHaveBeenCalledWith('graph');
+    expect(exchange).toHaveBeenCalledWith('dynamics');
+  });
+
+  it('uses the validated Graph token and lazily exchanges other resources', async () => {
+    const exchange = vi.fn(async (resource: 'graph' | 'dynamics') => `${resource}-token`);
+    const context = createOboRequestContext('incoming-assertion', exchange, {
+      graph: 'validated-graph-token',
+    });
+
+    const result = await requestContext.run(context, async () => ({
+      graph: await getRequestAccessToken('graph'),
+      dynamics: await getRequestAccessToken('dynamics'),
+    }));
+
+    expect(result).toEqual({ graph: 'validated-graph-token', dynamics: 'dynamics-token' });
+    expect(exchange).toHaveBeenCalledTimes(1);
+    expect(exchange).toHaveBeenCalledWith('dynamics');
+  });
+
+  it('rejects an invalid assertion before dispatching a local handler', async () => {
+    const exchange = vi.fn(async () => {
+      throw new Error('invalid assertion');
+    });
+    const handler = vi.fn();
+
+    await expect(
+      (async () => {
+        const context = await createValidatedOboRequestContext('invalid-assertion', exchange);
+        await requestContext.run(context, handler);
+      })()
+    ).rejects.toThrow('invalid assertion');
+
+    expect(exchange).toHaveBeenCalledWith('graph');
+    expect(handler).not.toHaveBeenCalled();
+  });
 });
 
 describe('GraphClient request-context integration', () => {
@@ -171,6 +226,35 @@ describe('GraphClient request-context integration', () => {
     expect(tokenCounts['USER_A_TOKEN']).toBe(1);
     expect(tokenCounts['USER_B_TOKEN']).toBe(1);
     expect(tokenCounts['USER_C_TOKEN']).toBe(1);
+  });
+
+  it('uses the Graph resource token from an OBO request context', async () => {
+    const capturedTokens: string[] = [];
+    global.fetch = vi
+      .fn()
+      .mockImplementation(async (_url: string, options: { headers?: Record<string, string> }) => {
+        capturedTokens.push(options.headers?.Authorization?.replace('Bearer ', '') ?? '');
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ id: 'test' }),
+          headers: new Headers(),
+        };
+      });
+
+    const graphClient = new GraphClient(
+      { getToken: vi.fn().mockResolvedValue(null) } as unknown as AuthManager,
+      { clientId: 'test-client', tenantId: 'common', cloudType: 'global' }
+    );
+    const exchange = vi.fn(async (resource: 'graph' | 'dynamics') => `${resource}-obo-token`);
+
+    await requestContext.run(createOboRequestContext('assertion', exchange), () =>
+      graphClient.makeRequest('/me')
+    );
+
+    expect(capturedTokens).toEqual(['graph-obo-token']);
+    expect(exchange).toHaveBeenCalledTimes(1);
+    expect(exchange).toHaveBeenCalledWith('graph');
   });
 
   it('should not leak tokens when requests overlap in time', async () => {

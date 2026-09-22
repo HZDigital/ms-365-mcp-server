@@ -36,7 +36,7 @@ import { access } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { TOOL_CATEGORIES } from './tool-categories.js';
-import { getRequestTokens } from './request-context.js';
+import { getRequestAuditToken, getRequestTokens } from './request-context.js';
 import { parseTeamsUrl } from './lib/teams-url-parser.js';
 import { buildBM25Index, scoreQuery, tokenize, type BM25Index } from './lib/bm25.js';
 import { deriveTargetResource, type AuditTargetResource } from './audit-target-resource.js';
@@ -713,7 +713,7 @@ async function executeUtilityTool(
 ): Promise<CallToolResult> {
   const requestId = randomUUID();
   const startTime = Date.now();
-  const upn = getUserIdentityForAudit(getRequestTokens()?.accessToken);
+  const upn = getUserIdentityForAudit(getRequestAuditToken());
   const destructive = isDestructiveOperation(utility.method, {
     readOnly: isReadOnlyUtilityTool(utility),
   });
@@ -921,7 +921,7 @@ function auditToolDenied(policy: DeniedToolPolicy, params: Record<string, unknow
   auditLog({
     event: 'tool.denied',
     request_id: randomUUID(),
-    user_principal_name: getUserIdentityForAudit(getRequestTokens()?.accessToken),
+    user_principal_name: getUserIdentityForAudit(getRequestAuditToken()),
     tool: policy.toolName,
     status: 'denied',
     reason: policy.reason,
@@ -983,7 +983,7 @@ async function checkAccountParamInBearerMode(
   authManager?: AuthManager
 ): Promise<string | null> {
   if (!accountParam || !authManager) return null;
-  const contextToken = getRequestTokens()?.accessToken;
+  const contextToken = getRequestAuditToken();
   if (!contextToken && !authManager.isOAuthModeEnabled()) return null;
   const bearerToken = contextToken ?? (await authManager.getToken().catch(() => null)) ?? undefined;
   const bearerIdentity = getUserIdentityForAudit(bearerToken);
@@ -1776,7 +1776,7 @@ async function executeGraphTool(
 
   const requestId = randomUUID();
   const startTime = Date.now();
-  const upn = getUserIdentityForAudit(getRequestTokens()?.accessToken);
+  const upn = getUserIdentityForAudit(getRequestAuditToken());
   const httpMethod = tool.method.toUpperCase();
   let targetResource: AuditTargetResource | undefined;
   // Hoisted alongside targetResource so the catch-path audit can still report
