@@ -1,8 +1,3 @@
-# Contributor Guidelines
-
-Thank you for helping improve the Microsoft 365 MCP Server. We welcome bug
-reports, documentation improvements, feature proposals, and code contributions.
-
 ## Before You Start
 
 For a bug fix or documentation change, please open an [issue](https://github.com/HZDigital/ms-365-mcp-server/issues),
