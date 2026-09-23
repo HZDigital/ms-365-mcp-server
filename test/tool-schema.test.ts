@@ -180,6 +180,25 @@ describe('describeToolSchema parity with registerGraphTools (discovery-mode drif
     }
   );
 
+  it.each([
+    'list-drives',
+    'list-sharepoint-site-drives',
+    'list-folder-files',
+    'search-onedrive-files',
+  ])('advertises only supported drive collection query options for %s', (name) => {
+    const shape = registered.get(name)!;
+    const discovery = schemaFor(name);
+    for (const key of ['count', 'skip', 'filter', 'search']) {
+      expect(shape[key]).toBeUndefined();
+      expect(discovery.parameters.find((p) => p.name === key)).toBeUndefined();
+    }
+    for (const key of ['top', 'select', 'expand', 'orderby', 'skiptoken']) {
+      expect(shape[key]).toBeDefined();
+      expect(discovery.parameters.find((p) => p.name === key)).toBeDefined();
+    }
+    expect(shape.fetchAllPages).toBeDefined();
+  });
+
   it('enforces the chat page limit without relaxing stricter provider bounds', () => {
     const top = registered.get('list-chats')!.top;
     expect(top.safeParse(50).success).toBe(true);

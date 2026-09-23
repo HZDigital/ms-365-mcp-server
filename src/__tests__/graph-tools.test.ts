@@ -1286,6 +1286,96 @@ describe('graph-tools', () => {
 
   // ---- 2a. skiptoken cursor paging ----
   describe('shared query contract at execution', () => {
+    it.each([
+      'list-drives',
+      'list-sharepoint-site-drives',
+      'list-folder-files',
+      'search-onedrive-files',
+    ])(
+      'rejects unsupported drive collection options before Graph dispatch for %s',
+      async (alias) => {
+        mockEndpoints.push(makeEndpoint({ alias }));
+        mockEndpointsJson = [makeConfig({ toolName: alias })];
+        const graphClient = createMockGraphClient();
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+
+        for (const [key, value] of [
+          ['count', true],
+          ['$COUNT', true],
+          ['count', null],
+          ['skip', 20],
+          ['$Skip', 20],
+          ['skip', null],
+          ['filter', "name eq 'KnB'"],
+          ['filter', ''],
+          ['search', 'KnB'],
+        ] as const) {
+          const result = await server.tools.get(alias)!.handler({ [key]: value });
+          expect(result.isError, `${alias}.${key}`).toBe(true);
+          expect(JSON.parse(result.content[0].text).error).toBe('invalid_query_parameter');
+        }
+        expect(graphClient.graphRequest).not.toHaveBeenCalled();
+      }
+    );
+
+    it('rejects a $skip cursor on a drive collection before Graph dispatch', async () => {
+      const alias = 'list-folder-files';
+      mockEndpoints.push(makeEndpoint({ alias }));
+      mockEndpointsJson = [makeConfig({ toolName: alias })];
+      const graphClient = createMockGraphClient();
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+
+      const result = await server.tools.get(alias)!.handler({
+        skiptoken: 'https://graph.microsoft.com/v1.0/drives/d1/items/f1/children?$skip=20',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text).error).toBe('invalid_skiptoken');
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
+    it('still follows returned links for a folder listing', async () => {
+      const alias = 'list-folder-files';
+      mockEndpoints.push(
+        makeEndpoint({ alias, path: '/drives/:driveId/items/:driveItemId/children' })
+      );
+      mockEndpointsJson = [makeConfig({ toolName: alias })];
+      const nextLink =
+        'https://graph.microsoft.com/v1.0/drives/d1/items/f1/children?$top=1&$skiptoken=next';
+      const graphClient = createMockGraphClient([
+        {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ value: [{ id: 'a' }], '@odata.nextLink': nextLink }),
+            },
+          ],
+        },
+        { content: [{ type: 'text', text: JSON.stringify({ value: [{ id: 'b' }] }) }] },
+      ]);
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+
+      const result = await server.tools.get(alias)!.handler({
+        driveId: 'd1',
+        driveItemId: 'f1',
+        top: 1,
+        fetchAllPages: true,
+      });
+
+      expect(result.isError).not.toBe(true);
+      expect(JSON.parse(result.content[0].text).value).toEqual([{ id: 'a' }, { id: 'b' }]);
+      expect(graphClient.graphRequest).toHaveBeenCalledTimes(2);
+      expect(graphClient.graphRequest.mock.calls[1][0]).toBe(
+        '/drives/d1/items/f1/children?$top=1&$skiptoken=next'
+      );
+    });
+
     it.each([{ skiptoken: 123 }, { $SKIPTOKEN: 123 }, { COUNT: 'true' }, { $Count: 'true' }])(
       'rejects invalid cursor and mixed-case query values: %j',
       async (params) => {

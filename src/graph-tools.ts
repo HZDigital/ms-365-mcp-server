@@ -45,7 +45,7 @@ export interface DiscoverySearchIndex {
   nameTokens: Map<string, Set<string>>;
 }
 import { describeToolSchema, describeUtilityToolSchema } from './lib/tool-schema.js';
-import { queryParameterSchema } from './lib/query-parameter-schema.js';
+import { DRIVE_COLLECTION_TOOLS, queryParameterSchema } from './lib/query-parameter-schema.js';
 import {
   TOP_UNSUPPORTED_DELTA_TOOLS,
   shouldOmitTopParam,
@@ -419,6 +419,22 @@ function normalizeSkiptokenQueryParam(
   } else if (/:\/\/|\?|^(?:\$|%24)\w+=/.test(token)) {
     const skip = token.match(/(?:^|[?&])(?:\$|%24)skip=(\d+)(?=&|$)/i)?.[1];
     if (skip === undefined) return cursorlessLink();
+    if (DRIVE_COLLECTION_TOOLS.has(toolAlias)) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              error: 'invalid_skiptoken',
+              tool: toolAlias,
+              message:
+                'This drive collection does not support $skip. Use a $skiptoken from its returned @odata.nextLink, or call with fetchAllPages: true.',
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
     logger.info(
       `Auto-corrected parameter 'skiptoken': link pages with $skip, sending $skip=${skip}`
     );
@@ -1973,13 +1989,16 @@ async function executeGraphTool(
       // discovery and normal registration. Preserve the existing delta $top handling.
       const isQuery = paramDef?.type === 'Query' || isOdataParam;
       const ignoredDeltaTop = shouldOmitTopParam(tool.alias) && normalizedParamName === 'top';
-      if (isQuery && !ignoredDeltaTop && paramValue != null && paramValue !== '') {
+      if (isQuery && !ignoredDeltaTop) {
         const schema = queryParameterSchema(
           tool.alias,
           normalizedParamName,
           paramDef?.schema ?? z.any()
         );
-        if (!schema || !schema.safeParse(paramValue).success) {
+        if (
+          !schema ||
+          (paramValue != null && paramValue !== '' && !schema.safeParse(paramValue).success)
+        ) {
           return {
             content: [
               {

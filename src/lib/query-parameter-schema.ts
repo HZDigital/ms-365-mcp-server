@@ -5,6 +5,18 @@ import { getODataParamDescription, shouldOmitTopParam } from './param-descriptio
 // https://learn.microsoft.com/en-us/graph/api/user-list-joinedteams
 // https://learn.microsoft.com/en-us/graph/api/associatedteaminfo-list
 const TEAM_LIST_TOOLS = new Set(['list-joined-teams', 'list-my-associated-teams']);
+// These drive collections have a narrower OData contract than the generated
+// OpenAPI schema advertises. In particular, Graph rejects $count and $skip.
+// https://learn.microsoft.com/en-us/graph/api/drive-list
+// https://learn.microsoft.com/en-us/graph/api/driveitem-list-children
+// https://learn.microsoft.com/en-us/graph/api/driveitem-search
+export const DRIVE_COLLECTION_TOOLS = new Set([
+  'list-drives',
+  'list-sharepoint-site-drives',
+  'list-folder-files',
+  'search-onedrive-files',
+]);
+const DRIVE_COLLECTION_QUERY_PARAMS = new Set(['expand', 'select', 'skiptoken', 'top', 'orderby']);
 const CUSTOM_EMOJI_QUERY_DESCRIPTIONS: Record<string, string> = {
   top: 'Number of custom emojis to return in one page. Each emoji includes base64 image content; use a small page size to keep the response manageable.',
   filter:
@@ -22,6 +34,9 @@ export function queryParameterSchema(
 ): z.ZodTypeAny | undefined {
   const bareName = name.replace(/^\$/, '').toLowerCase();
   if (TEAM_LIST_TOOLS.has(toolName)) return undefined;
+  if (DRIVE_COLLECTION_TOOLS.has(toolName) && !DRIVE_COLLECTION_QUERY_PARAMS.has(bareName)) {
+    return undefined;
+  }
   // The generated collection schema advertises generic OData options, but the
   // custom-emoji REST contract documents only $top/$filter. Keep the synthetic
   // cursor for following a returned @odata.nextLink through the existing paging path.
