@@ -74,6 +74,30 @@ describe('Dataverse client', () => {
     );
   });
 
+  it('uses the Dynamics resource token for WhoAmI in an OBO request context', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ UserId: '00000000-0000-4000-8000-000000000000' }))
+      );
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const client = new DataverseClient(parseDynamicsUrl('https://contoso.crm.dynamics.com')!);
+    const exchange = vi.fn(async (resource: 'graph' | 'dynamics') => `${resource}-obo-token`);
+
+    await requestContext.run(createOboRequestContext('assertion', exchange), () =>
+      client.request('/WhoAmI')
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://contoso.crm.dynamics.com/api/data/v9.2/WhoAmI',
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: 'Bearer dynamics-obo-token' }),
+      })
+    );
+    expect(exchange).toHaveBeenCalledTimes(1);
+    expect(exchange).toHaveBeenCalledWith('dynamics');
+  });
+
   it('requests lookup display labels and target metadata when asked', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ value: [] })));
     global.fetch = fetchMock as unknown as typeof fetch;
@@ -147,6 +171,7 @@ describe('Dataverse client', () => {
 describe('Dynamics tools', () => {
   it('declares generic, core CRM, and concrete activity tools', () => {
     expect(DYNAMICS_TOOL_PRESETS).toContain('dynamics-query-records');
+    expect(DYNAMICS_TOOL_PRESETS).toContain('dynamics-get-current-user');
     expect(DYNAMICS_TOOL_PRESETS).toContain('dynamics-create-account');
     expect(DYNAMICS_TOOL_PRESETS).toContain('dynamics-create-contact');
     expect(DYNAMICS_TOOL_PRESETS).toContain('dynamics-create-lead');
@@ -178,6 +203,26 @@ describe('Dynamics tools', () => {
     expect(client.request).toHaveBeenCalledWith(
       expect.stringContaining('$expand=Attributes(%24select%3DLogicalName)')
     );
+  });
+
+  it('gets the authenticated caller from Dataverse without a name lookup', async () => {
+    const client = {
+      request: vi.fn().mockResolvedValue({
+        UserId: '00000000-0000-4000-8000-000000000000',
+        BusinessUnitId: '00000000-0000-4000-8000-000000000001',
+        OrganizationId: '00000000-0000-4000-8000-000000000002',
+      }),
+    } as unknown as DataverseClient;
+    const tool = createDynamicsTools(client).find(
+      (item) => item.name === 'dynamics-get-current-user'
+    )!;
+
+    const result = await tool.execute({}, {} as UtilityToolContext);
+
+    expect(client.request).toHaveBeenCalledWith('/WhoAmI');
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      UserId: '00000000-0000-4000-8000-000000000000',
+    });
   });
 
   it('includes lookup annotations by default on record queries', async () => {

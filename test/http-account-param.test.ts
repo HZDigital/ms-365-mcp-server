@@ -16,7 +16,13 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerGraphTools } from '../src/graph-tools.js';
 import GraphClient from '../src/graph-client.js';
 import AuthManager from '../src/auth.js';
-import { requestContext } from '../src/request-context.js';
+import { createValidatedOboRequestContext, requestContext } from '../src/request-context.js';
+import { auditLog } from '../src/audit-log.js';
+
+vi.mock('../src/audit-log.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/audit-log.js')>()),
+  auditLog: vi.fn(),
+}));
 
 vi.mock('../src/logger.js', () => ({
   default: {
@@ -62,6 +68,7 @@ describe('Discussion #467: account parameter in HTTP/OAuth mode', () => {
     server = new McpServer({ name: 'test', version: '1.0.0' });
     originalFetch = global.fetch;
     capturedHandler = undefined;
+    vi.mocked(auditLog).mockClear();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     vi.spyOn(server, 'registerTool').mockImplementation(((...args: any[]) => {
@@ -130,6 +137,59 @@ describe('Discussion #467: account parameter in HTTP/OAuth mode', () => {
     expect(result.isError).toBeUndefined();
     expect(fetchSpy).toHaveBeenCalled();
   });
+
+  it('validates OBO accounts with the cached Graph token while auditing the assertion', async () => {
+    const { fetchSpy, mockAuthManager } = setup();
+    const assertion = makeJwt({ sub: 'opaque-caller-subject' });
+    const graphToken = makeJwt({ upn: 'User1@Domain.com' });
+    const exchange = vi.fn().mockResolvedValue(graphToken);
+    const context = await createValidatedOboRequestContext(assertion, exchange);
+
+    const result = await requestContext.run(context, () =>
+      capturedHandler!({ account: 'user1@domain.com' })
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchSpy).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: `Bearer ${graphToken}` }),
+      })
+    );
+    expect(exchange).toHaveBeenCalledTimes(1);
+    expect(exchange).toHaveBeenCalledWith('graph');
+    expect(mockAuthManager.getToken).not.toHaveBeenCalled();
+    expect(mockAuthManager.getTokenForAccount).not.toHaveBeenCalled();
+    expect(auditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'tool.call',
+        tool: 'list-mail-messages',
+        status: 'success',
+        user_principal_name: 'opaque-caller-subject',
+      })
+    );
+  });
+
+  it.each(['user2@domain.com', 'opaque-caller-subject'])(
+    'refuses OBO account %s when it does not match the Graph token identity',
+    async (account) => {
+      const { fetchSpy, mockAuthManager } = setup();
+      const assertion = makeJwt({ sub: 'opaque-caller-subject' });
+      const graphToken = makeJwt({ upn: 'user1@domain.com' });
+      const exchange = vi.fn().mockResolvedValue(graphToken);
+      const context = await createValidatedOboRequestContext(assertion, exchange);
+
+      const result = await requestContext.run(context, () => capturedHandler!({ account }));
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("'account' parameter is not supported");
+      expect(result.content[0].text).toContain('user1@domain.com');
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(exchange).toHaveBeenCalledTimes(1);
+      expect(mockAuthManager.getToken).not.toHaveBeenCalled();
+      expect(mockAuthManager.getTokenForAccount).not.toHaveBeenCalled();
+    }
+  );
 
   it('refuses account param when the bearer identity cannot be determined (opaque token)', async () => {
     const { fetchSpy } = setup();
