@@ -97,6 +97,28 @@ export const TOP_PARAM_DESCRIPTION =
 
 export const SKIP_PARAM_DESCRIPTION = 'Items to skip for pagination. Not supported with $search.';
 
+// Reaches ~100 tools, like $search, so it stays short. It asks for the whole link because
+// normalizeSkiptokenQueryParam in graph-tools.ts reads both $skiptoken and $skip out of it.
+export const SKIPTOKEN_PARAM_DESCRIPTION =
+  'Next page: the @odata.nextLink from the previous response. Keep the other arguments the same.';
+
+// Query options that only exist on a collection, which are used to determine if
+// skiptoken pagination is allowed
+const COLLECTION_QUERY_PARAMS = new Set(['top', 'filter', 'orderby', 'count']);
+
+// Guess whether a tool returns a collection and can take a `skiptoken`, given the
+// parameter names in its schema.
+export function isSkiptokenApplicable(
+  tool: { method: string },
+  paramNames: Iterable<string>
+): boolean {
+  if (tool.method.toUpperCase() !== 'GET') return false;
+  for (const name of paramNames) {
+    if (COLLECTION_QUERY_PARAMS.has(name.replace(/^\$/, '').toLowerCase())) return true;
+  }
+  return false;
+}
+
 export const COUNT_PARAM_DESCRIPTION =
   'Set true to enable advanced query mode (ConsistencyLevel: eventual). Required for complex $filter on flag/flagStatus or contains().';
 
@@ -134,11 +156,12 @@ export function getAccountParamDescription(accountNames: string[]): string {
   );
 }
 
-export function getFetchAllPagesParamDescription(maxPages: number): string {
+export function getFetchAllPagesParamDescription(maxPages: number, toolAlias?: string): string {
+  const narrowingOptions = toolAlias === 'list-custom-emojis' ? '$filter' : '$filter/$search';
   return (
     `Follow @odata.nextLink and merge up to ${maxPages} pages into one response. ` +
     'Can return enormous payloads—only when the user explicitly needs a full export. ' +
-    'Prefer a small $top first, then paginate or narrow with $filter/$search.'
+    `Prefer a small $top first, then paginate or narrow with ${narrowingOptions}.`
   );
 }
 

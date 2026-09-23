@@ -409,6 +409,201 @@ describe('graph-tools', () => {
     });
   });
 
+  describe('audit response volume', () => {
+    it('lifts result volume from _meta onto the audit event', async () => {
+      const endpoint = makeEndpoint({
+        method: 'get',
+        path: '/me/messages',
+        alias: 'list-mail-messages',
+      });
+      const config = makeConfig({
+        pathPattern: '/me/messages',
+        method: 'get',
+        toolName: 'list-mail-messages',
+      });
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [config];
+
+      const graphClient = createMockGraphClient([
+        {
+          content: [{ type: 'text', text: JSON.stringify({ value: [{ id: 'm1' }] }) }],
+          _meta: {
+            http_status: 200,
+            result_count: 4821,
+            result_has_more: true,
+            response_bytes: 8_412_004,
+          },
+        },
+      ]);
+
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(
+        server as unknown as Parameters<typeof registerGraphTools>[0],
+        graphClient as unknown as Parameters<typeof registerGraphTools>[1]
+      );
+
+      await server.tools.get('list-mail-messages')!.handler({});
+
+      expect(auditLogMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tool: 'list-mail-messages',
+          status: 'success',
+          result_count: 4821,
+          result_has_more: true,
+          response_bytes: 8_412_004,
+        })
+      );
+    });
+
+    it('keeps result_has_more when it is false rather than dropping it', async () => {
+      const endpoint = makeEndpoint({
+        method: 'get',
+        path: '/me/messages',
+        alias: 'list-mail-messages',
+      });
+      const config = makeConfig({
+        pathPattern: '/me/messages',
+        method: 'get',
+        toolName: 'list-mail-messages',
+      });
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [config];
+
+      const graphClient = createMockGraphClient([
+        {
+          content: [{ type: 'text', text: JSON.stringify({ value: [] }) }],
+          _meta: { http_status: 200, result_count: 0, result_has_more: false },
+        },
+      ]);
+
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(
+        server as unknown as Parameters<typeof registerGraphTools>[0],
+        graphClient as unknown as Parameters<typeof registerGraphTools>[1]
+      );
+
+      await server.tools.get('list-mail-messages')!.handler({});
+
+      const [payload] = auditLogMock.mock.calls[0];
+      expect(payload.result_count).toBe(0);
+      expect(payload.result_has_more).toBe(false);
+    });
+
+    it('restates count and bytes for the whole read when pages are merged', async () => {
+      mockEndpoints.push(makeEndpoint());
+      mockEndpointsJson = [makeConfig()];
+
+      const graphClient = createMockGraphClient([
+        {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                value: [{ id: '1' }, { id: '2' }],
+                '@odata.nextLink': 'https://graph.microsoft.com/v1.0/me/messages?$skip=2',
+              }),
+            },
+          ],
+          _meta: { http_status: 200, result_count: 2, result_has_more: true, response_bytes: 1000 },
+        },
+        {
+          content: [{ type: 'text', text: JSON.stringify({ value: [{ id: '3' }] }) }],
+          _meta: { http_status: 200, result_count: 1, result_has_more: false, response_bytes: 700 },
+        },
+      ]);
+
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+
+      await server.tools.get('test-tool')!.handler({ fetchAllPages: true });
+
+      const [payload] = auditLogMock.mock.calls[0];
+      expect(payload.result_count).toBe(3);
+      expect(payload.result_has_more).toBe(false);
+      // Both pages, not just page one — the whole point of merging.
+      expect(payload.response_bytes).toBe(1700);
+    });
+
+    it('reports result_has_more when the merge loop stopped on a page cap', async () => {
+      const prevMaxPages = process.env.MS365_MCP_MAX_PAGES;
+      process.env.MS365_MCP_MAX_PAGES = '2';
+      try {
+        mockEndpoints.push(makeEndpoint());
+        mockEndpointsJson = [makeConfig()];
+
+        // Every page carries a nextLink, so the loop can only exit on the cap.
+        const graphClient = createMockGraphClient(
+          Array.from({ length: 5 }, (_, i) => ({
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  value: [{ id: `item-${i}` }],
+                  '@odata.nextLink': `https://graph.microsoft.com/v1.0/me/messages?$skip=${i + 1}`,
+                }),
+              },
+            ],
+            _meta: { http_status: 200, result_count: 1, result_has_more: true, response_bytes: 50 },
+          }))
+        );
+
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+
+        await server.tools.get('test-tool')!.handler({ fetchAllPages: true });
+
+        const [payload] = auditLogMock.mock.calls[0];
+        expect(payload.result_count).toBe(2);
+        // Truncated at the cap: the merged body drops @odata.nextLink, so the
+        // audit event is the only place Graph-has-more survives.
+        expect(payload.result_has_more).toBe(true);
+        expect(payload.response_bytes).toBe(100);
+      } finally {
+        if (prevMaxPages === undefined) {
+          delete process.env.MS365_MCP_MAX_PAGES;
+        } else {
+          process.env.MS365_MCP_MAX_PAGES = prevMaxPages;
+        }
+      }
+    });
+
+    it('omits the volume fields when the client supplied none', async () => {
+      const endpoint = makeEndpoint({ method: 'get', path: '/me', alias: 'get-current-user' });
+      const config = makeConfig({
+        pathPattern: '/me',
+        method: 'get',
+        toolName: 'get-current-user',
+      });
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [config];
+
+      const graphClient = createMockGraphClient([
+        {
+          content: [{ type: 'text', text: JSON.stringify({ id: 'user-1' }) }],
+          _meta: { http_status: 200 },
+        },
+      ]);
+
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(
+        server as unknown as Parameters<typeof registerGraphTools>[0],
+        graphClient as unknown as Parameters<typeof registerGraphTools>[1]
+      );
+
+      await server.tools.get('get-current-user')!.handler({});
+
+      const [payload] = auditLogMock.mock.calls[0];
+      expect(payload).not.toHaveProperty('result_count');
+      expect(payload).not.toHaveProperty('result_has_more');
+      expect(payload).not.toHaveProperty('response_bytes');
+    });
+  });
+
   describe('audit recipient metadata', () => {
     const draftEndpoint = () => {
       const endpoint = makeEndpoint({
@@ -1086,6 +1281,331 @@ describe('graph-tools', () => {
         status: 'success',
       });
       expect(payload).not.toHaveProperty('target_resource');
+    });
+  });
+
+  // ---- 2a. skiptoken cursor paging ----
+  describe('shared query contract at execution', () => {
+    it.each([{ skiptoken: 123 }, { $SKIPTOKEN: 123 }, { COUNT: 'true' }, { $Count: 'true' }])(
+      'rejects invalid cursor and mixed-case query values: %j',
+      async (params) => {
+        mockEndpoints.push(makeEndpoint());
+        mockEndpointsJson = [makeConfig()];
+        const graphClient = createMockGraphClient();
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+        const result = await server.tools.get('test-tool')!.handler(params);
+        expect(result.isError).toBe(true);
+        expect(graphClient.graphRequest).not.toHaveBeenCalled();
+      }
+    );
+
+    it('accepts valid mixed-case query values and string cursors', async () => {
+      mockEndpoints.push(makeEndpoint());
+      mockEndpointsJson = [makeConfig()];
+      const graphClient = createMockGraphClient();
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+      await server.tools.get('test-tool')!.handler({ COUNT: true, $SKIPTOKEN: 'next-token' });
+      expect(graphClient.graphRequest).toHaveBeenCalledTimes(1);
+      const request = JSON.stringify(graphClient.graphRequest.mock.calls[0]);
+      expect(request).toContain('$count=true');
+      expect(request).toContain('$skiptoken=next-token');
+    });
+
+    it.each(['list-calendar-events-delta', 'list-calendar-view-delta'])(
+      'ignores stale mixed-case top values for %s',
+      async (alias) => {
+        mockEndpoints.push(makeEndpoint({ alias }));
+        mockEndpointsJson = [makeConfig({ toolName: alias })];
+        const graphClient = createMockGraphClient();
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+        for (const key of ['top', '$top', 'TOP', '$TOP', '$Top']) {
+          await server.tools.get(alias)!.handler({ [key]: 10 });
+        }
+        expect(graphClient.graphRequest).toHaveBeenCalledTimes(5);
+        for (const call of graphClient.graphRequest.mock.calls) {
+          expect(JSON.stringify(call)).not.toContain('$top');
+        }
+      }
+    );
+
+    it.each(['list-joined-teams', 'list-my-associated-teams'])(
+      'rejects unsupported query options before Graph dispatch for %s',
+      async (alias) => {
+        mockEndpoints.push(makeEndpoint({ alias }));
+        mockEndpointsJson = [makeConfig({ toolName: alias })];
+        const graphClient = createMockGraphClient();
+        const server = createMockServer();
+        const { registerGraphTools } = await loadModule();
+        registerGraphTools(server as any, graphClient as any);
+        for (const key of ['top', '$top', 'skiptoken', '$skiptoken', 'select', '$select']) {
+          const value = key.replace('$', '') === 'top' ? 100 : 'next-token';
+          const result = await server.tools.get(alias)!.handler({ [key]: value });
+          expect(result.isError).toBe(true);
+        }
+        expect(graphClient.graphRequest).not.toHaveBeenCalled();
+      }
+    );
+
+    it('rejects oversized chat pages before Graph dispatch, including dollar-prefixed input', async () => {
+      mockEndpoints.push(makeEndpoint({ alias: 'list-chats' }));
+      mockEndpointsJson = [makeConfig({ toolName: 'list-chats' })];
+      const graphClient = createMockGraphClient();
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+      for (const key of ['top', '$top']) {
+        const result = await server.tools.get('list-chats')!.handler({ [key]: 100 });
+        expect(result.isError).toBe(true);
+      }
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
+    it('sends a calendar field array as comma-separated text in one Graph request', async () => {
+      const alias = 'list-calendar-events-delta';
+      mockEndpoints.push(makeEndpoint({ alias }));
+      mockEndpointsJson = [makeConfig({ toolName: alias })];
+      const graphClient = createMockGraphClient();
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+      await server.tools.get(alias)!.handler({ select: ['id', 'subject'] });
+      expect(graphClient.graphRequest).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(graphClient.graphRequest.mock.calls[0])).toContain('id,subject');
+    });
+  });
+
+  describe('skiptoken cursor', () => {
+    const prevAllowPagination = process.env.MS365_MCP_ALLOW_PAGINATION;
+    afterEach(() => {
+      if (prevAllowPagination === undefined) delete process.env.MS365_MCP_ALLOW_PAGINATION;
+      else process.env.MS365_MCP_ALLOW_PAGINATION = prevAllowPagination;
+    });
+
+    const callForResult = async (args: Record<string, unknown>) => {
+      mockEndpoints.push(makeEndpoint());
+      mockEndpointsJson = [makeConfig()];
+      const graphClient = createMockGraphClient();
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, graphClient as any);
+      const result = await server.tools.get('test-tool')!.handler(args);
+      return { result, graphClient };
+    };
+
+    /** The request path the tool sent to Graph. */
+    const callWith = async (args: Record<string, unknown>) => {
+      const { graphClient } = await callForResult(args);
+      return graphClient.graphRequest.mock.calls[0][0] as string;
+    };
+
+    /** A single-object GET: $select/$expand and nothing collection-shaped. */
+    const singleObjectEndpoint = () =>
+      makeEndpoint({
+        alias: 'get-thing',
+        path: '/me/thing',
+        parameters: [
+          { name: 'select', type: 'Query', schema: z.string().optional() },
+          { name: 'expand', type: 'Query', schema: z.string().optional() },
+        ],
+      });
+
+    const registerAnd = async (endpoint: any, config: any) => {
+      mockEndpoints.push(endpoint);
+      mockEndpointsJson = [config];
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, createMockGraphClient() as any);
+      return server;
+    };
+
+    it('omits skiptoken on single-object GETs', async () => {
+      const server = await registerAnd(
+        singleObjectEndpoint(),
+        makeConfig({ toolName: 'get-thing', pathPattern: '/me/thing' })
+      );
+
+      expect(server.tools.get('get-thing')!.schema.skiptoken).toBeUndefined();
+    });
+
+    it('keeps skiptoken on delta tools that have $top stripped', async () => {
+      // list-calendar-events-delta pages via cursor but is in TOP_UNSUPPORTED_DELTA_TOOLS,
+      // so a $top-only test would strip the cursor from an endpoint that needs it.
+      const endpoint = makeEndpoint({
+        alias: 'list-calendar-events-delta',
+        path: '/me/calendarView/delta',
+      });
+      const server = await registerAnd(
+        endpoint,
+        makeConfig({
+          toolName: 'list-calendar-events-delta',
+          pathPattern: '/me/calendarView/delta',
+        })
+      );
+
+      const schema = server.tools.get('list-calendar-events-delta')!.schema;
+      expect(schema.top).toBeUndefined();
+      expect(schema.skiptoken).toBeDefined();
+    });
+
+    it('advertises skiptoken on GET list tools', async () => {
+      mockEndpoints.push(makeEndpoint());
+      mockEndpointsJson = [makeConfig()];
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, createMockGraphClient() as any);
+
+      expect(server.tools.get('test-tool')!.schema.skiptoken).toBeDefined();
+    });
+
+    it('still advertises skiptoken when MS365_MCP_ALLOW_PAGINATION is disabled', async () => {
+      // Manual paging returns one page, so the auto-follow kill switch must not
+      // remove the only cursor a stateless client has.
+      process.env.MS365_MCP_ALLOW_PAGINATION = '0';
+      mockEndpoints.push(makeEndpoint());
+      mockEndpointsJson = [makeConfig()];
+      const server = createMockServer();
+      const { registerGraphTools } = await loadModule();
+      registerGraphTools(server as any, createMockGraphClient() as any);
+
+      expect(server.tools.get('test-tool')!.schema.fetchAllPages).toBeUndefined();
+      expect(server.tools.get('test-tool')!.schema.skiptoken).toBeDefined();
+    });
+
+    it('forwards a bare token as $skiptoken', async () => {
+      const path = await callWith({ skiptoken: 'abc123' });
+      expect(path).toContain('$skiptoken=abc123');
+    });
+
+    it('does not double-encode a token copied from @odata.nextLink', async () => {
+      // Tokens arrive percent-encoded straight out of the nextLink URL; encoding
+      // them again yields %253d and Graph rejects the cursor.
+      const path = await callWith({ skiptoken: 'eyJhIjoxfQ%3d%3d' });
+      expect(path).toContain('$skiptoken=eyJhIjoxfQ%3D%3D');
+      expect(path).not.toContain('%253');
+    });
+
+    it('extracts the token when handed a whole nextLink URL', async () => {
+      const path = await callWith({
+        skiptoken: 'https://graph.microsoft.com/v1.0/me/chats?$top=5&$filter=x&$skiptoken=tok123',
+      });
+      expect(path).toContain('$skiptoken=tok123');
+      expect(path).not.toContain('graph.microsoft.com');
+    });
+
+    it('keeps only the cursor when the nextLink has params after it', async () => {
+      const path = await callWith({ skiptoken: '$skiptoken=tok123&$top=5' });
+      expect(path).toContain('$skiptoken=tok123');
+      expect(path).not.toContain('tok123&');
+    });
+
+    it('accepts the $-prefixed param name', async () => {
+      const path = await callWith({ $skiptoken: 'abc123' });
+      expect(path).toContain('$skiptoken=abc123');
+    });
+
+    it.each(['', '   '])('omits $skiptoken entirely when blank (%j)', async (blank) => {
+      const path = await callWith({ skiptoken: blank });
+      expect(path).not.toContain('skiptoken');
+    });
+
+    it('sends $skip when the nextLink pages with $skip', async () => {
+      // Outlook mail and calendar nextLinks carry $skip, not $skiptoken
+      const path = await callWith({
+        top: 10,
+        skiptoken: 'https://graph.microsoft.com/v1.0/me/messages?$top=10&$skip=10',
+      });
+      expect(path).toContain('$skip=10');
+      expect(path).not.toContain('skiptoken');
+    });
+
+    it('ignores a cursor-looking value inside another query param', async () => {
+      const path = await callWith({
+        skiptoken:
+          "https://graph.microsoft.com/v1.0/me/messages?$filter=subject eq '%24skip=100'&$skip=10",
+      });
+      expect(path).toContain('$skip=10');
+      expect(path).not.toContain('100');
+    });
+
+    it('refuses a link with no cursor to page with', async () => {
+      const { result, graphClient } = await callForResult({
+        skiptoken:
+          'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta()?$deltatoken=abc',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text).error).toBe('invalid_skiptoken');
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
+    it('refuses a delta token= link without calling it a deltaLink', async () => {
+      // get-drive-delta and get-sharepoint-sites-delta page with token=, so the refusal must
+      // not tell the model to pass the @odata.nextLink it just passed
+      const { result, graphClient } = await callForResult({
+        skiptoken: 'https://graph.microsoft.com/v1.0/me/drive/delta(token=1230919asd190410jlka)',
+      });
+
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.error).toBe('invalid_skiptoken');
+      expect(payload.message).not.toContain('deltaLink');
+      expect(payload.message).toContain('fetchAllPages');
+      expect(graphClient.graphRequest).not.toHaveBeenCalled();
+    });
+
+    it('refuses a link whose $skiptoken carries no value', async () => {
+      const { result } = await callForResult({
+        skiptoken: 'https://graph.microsoft.com/v1.0/me/chats?$skiptoken=&$top=5',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text).error).toBe('invalid_skiptoken');
+    });
+
+    it('accepts an encoded %24skiptoken marker', async () => {
+      const path = await callWith({
+        skiptoken: 'https://graph.microsoft.com/v1.0/me/chats?%24top=5&%24skiptoken=tok123',
+      });
+      expect(path).toContain('$skiptoken=tok123');
+    });
+
+    it.each([
+      ['https://graph.microsoft.com/v1.0/me/messages?$top=10&$skip=0', '$skip=0'],
+      ['https://graph.microsoft.com/v1.0/me/messages?%24top=10&%24skip=10', '$skip=10'],
+    ])('reads the $skip cursor out of %s', async (link, expected) => {
+      const path = await callWith({ skiptoken: link });
+      expect(path).toContain(expected);
+    });
+
+    it('refuses a $skip cursor that is not a plain number', async () => {
+      const { result } = await callForResult({
+        skiptoken: 'https://graph.microsoft.com/v1.0/me/messages?$skip=10junk',
+      });
+
+      expect(JSON.parse(result.content[0].text).error).toBe('invalid_skiptoken');
+    });
+
+    it('offers no fetchAllPages in the refusal when pagination is disabled', async () => {
+      process.env.MS365_MCP_ALLOW_PAGINATION = '0';
+      const { result } = await callForResult({
+        skiptoken: 'https://graph.microsoft.com/v1.0/me/drive/delta(token=1230919asd190410jlka)',
+      });
+
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.error).toBe('invalid_skiptoken');
+      expect(payload.message).not.toContain('fetchAllPages');
+    });
+
+    it('sends the cursor alongside the original query options', async () => {
+      const path = await callWith({ filter: "chatType eq 'oneOnOne'", top: 5, skiptoken: 'tok' });
+      expect(path).toContain('$filter=');
+      expect(path).toContain('$top=5');
+      expect(path).toContain('$skiptoken=tok');
     });
   });
 
@@ -2178,6 +2698,10 @@ describe('graph-tools', () => {
       const [path, options] = graphClient.graphRequest.mock.calls[0];
       expect(path).toBe('/me/photo/$value');
       expect(options.accessToken).toBeUndefined();
+      // The tool's contract is bytes: it must ask for binary handling regardless of
+      // the Content-Type Graph reports (application/msword is not on the allowlist).
+      expect(options.forceBinary).toBe(true);
+      expect(options.rawResponse).toBe(true);
     });
 
     it('rejects absolute URLs (Graph paths only)', async () => {

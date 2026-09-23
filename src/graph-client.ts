@@ -9,10 +9,16 @@ import {
   getSharedBreaker,
   loadResilienceConfig,
 } from './lib/graph-resilience.js';
+import { applyBatchContentType } from './lib/batch-content-type.js';
 import { applyMessageSignoffToRequest } from './lib/message-signoff.js';
 import { TRANSPORT_OK_MESSAGE } from './lib/select-projection.js';
 import { open, stat, unlink } from 'fs/promises';
 import { pipeline } from 'stream/promises';
+
+// Strict UTF-8: throws on any invalid sequence instead of substituting U+FFFD, and
+// keeps a leading byte-order mark so text round-trips byte for byte. The default
+// response.text() does neither, which is how a non-UTF-8 body turns into garbage.
+const UTF8_STRICT = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /**
  * Returns true if the given HTTP Content-Type header indicates a binary
@@ -64,6 +70,13 @@ interface GraphRequestOptions {
   // Pin this response to JSON regardless of the configured format, so the
   // fetchAllPages merge can JSON.parse each page before re-encoding (#560).
   forceJsonOutput?: boolean;
+  // Treat the body as bytes whatever Content-Type Graph reports, so callers whose
+  // contract is "return the bytes" (download-bytes) never go through the lossy
+  // response.text() path. Without this, only types on the isBinaryContentType
+  // allowlist are read raw; application/msword, application/rtf, message/rfc822
+  // and any other unlisted type come back as UTF-8 text with every invalid byte
+  // sequence replaced by U+FFFD, and the file cannot be rebuilt.
+  forceBinary?: boolean;
 
   [key: string]: unknown;
 }
@@ -89,6 +102,9 @@ interface GraphResponseMetadata {
   graph_batch_subrequest_count?: number;
   graph_batch_http_status_counts?: Record<string, number>;
   graph_batch_error_code_counts?: Record<string, number>;
+  result_count?: number;
+  result_has_more?: boolean;
+  response_bytes?: number;
 }
 
 interface GraphRequestResult {
@@ -143,6 +159,30 @@ function extractGraphErrorCodeFromBody(body: unknown): string | undefined {
   const error = body.error;
   const code = isRecord(error) ? error.code : body.code;
   return typeof code === 'string' ? code : undefined;
+}
+
+/**
+ * Volume metadata for the audit trail, derived from the already-parsed response.
+ *
+ * Sits beside extractBatchMetadata for the same reason: the object is in hand
+ * here, so this costs nothing and is independent of the output format the caller
+ * eventually serialises to.
+ *
+ * result_has_more is emitted explicitly when the payload is a collection, so a
+ * consumer can tell "complete result" from "not a collection" rather than having
+ * both appear as the same absence.
+ *
+ * Counts the top-level `value` array only. Nested collections under-report:
+ * Microsoft Search returns `value: [{ hitsContainers: [{ hits: [...] }] }]`, so
+ * 500 hits appear as result_count 1, and the semantic `retrieval` tool has no
+ * top-level `value` at all. Do not threshold on result_count for search tools.
+ */
+function extractPayloadMetadata(data: unknown): Partial<GraphResponseMetadata> {
+  if (!isRecord(data) || !Array.isArray(data.value)) return {};
+  return {
+    result_count: data.value.length,
+    result_has_more: typeof data['@odata.nextLink'] === 'string',
+  };
 }
 
 function extractBatchMetadata(data: unknown): Partial<GraphResponseMetadata> {
@@ -220,17 +260,33 @@ class GraphClient {
       }
 
       const contentTypeHeader = response.headers?.get?.('content-type') || '';
-      const isBinaryResponse = isBinaryContentType(contentTypeHeader);
+      const isBinaryResponse =
+        options.forceBinary === true || isBinaryContentType(contentTypeHeader);
       let metadata: GraphResponseMetadata = { http_status: response.status };
 
       let result: any;
 
-      if (isBinaryResponse) {
-        // Binary payloads (images, video, pdf, octet-stream, etc.) must not be
-        // decoded with response.text() — that performs a lossy UTF-8 decode and
-        // replaces every high byte with U+FFFD, destroying the file. Read the
-        // raw bytes and return them as base64 so callers can reconstruct them.
-        const buffer = Buffer.from(await response.arrayBuffer());
+      // Every body is read as bytes first. A body is handed on as text only if the
+      // caller did not ask for bytes, the Content-Type is not on the binary
+      // allowlist, AND it decodes as strict UTF-8. Anything else is returned as
+      // base64. This is the invariant: the client never returns lossy text — a
+      // Content-Type we failed to list (application/msword, application/rtf,
+      // message/rfc822) or a text/* body in another encoding can no longer come
+      // back with its bytes replaced by U+FFFD.
+      const buffer = Buffer.from(await response.arrayBuffer());
+      // Bytes actually transferred, before base64 inflates them ~1.37x.
+      metadata = { ...metadata, response_bytes: buffer.byteLength };
+
+      let text: string | undefined;
+      if (!isBinaryResponse) {
+        try {
+          text = UTF8_STRICT.decode(buffer);
+        } catch {
+          text = undefined; // not UTF-8: fall through to bytes
+        }
+      }
+
+      if (text === undefined) {
         result = {
           message: TRANSPORT_OK_MESSAGE,
           contentType: contentTypeHeader,
@@ -238,29 +294,27 @@ class GraphClient {
           contentLength: buffer.byteLength,
           contentBytes: buffer.toString('base64'),
         };
+      } else if (text === '') {
+        result = { message: TRANSPORT_OK_MESSAGE };
+      } else if (options.rawResponse) {
+        // download-bytes on /content wants the body verbatim. A JSON body
+        // would otherwise round-trip through JSON.parse -> JSON.stringify,
+        // which is lossy (whitespace, trailing newline, key order, number
+        // formatting). Return the raw text instead. (issue #546)
+        result = { message: TRANSPORT_OK_MESSAGE, rawResponse: text };
       } else {
-        const text = await response.text();
-
-        if (text === '') {
-          result = { message: TRANSPORT_OK_MESSAGE };
-        } else if (options.rawResponse) {
-          // download-bytes on /content wants the body verbatim. A JSON body
-          // would otherwise round-trip through JSON.parse -> JSON.stringify,
-          // which is lossy (whitespace, trailing newline, key order, number
-          // formatting). Return the raw text instead. (issue #546)
+        try {
+          // A UTF-8 BOM is kept in rawResponse for byte fidelity but is not JSON.
+          result = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+        } catch {
           result = { message: TRANSPORT_OK_MESSAGE, rawResponse: text };
-        } else {
-          try {
-            result = JSON.parse(text);
-          } catch {
-            result = { message: TRANSPORT_OK_MESSAGE, rawResponse: text };
-          }
         }
       }
 
       if (endpoint === '/$batch') {
         metadata = { ...metadata, ...extractBatchMetadata(result) };
       }
+      metadata = { ...metadata, ...extractPayloadMetadata(result) };
 
       // If includeHeaders is requested, add response headers to the result
       if (options.includeHeaders) {
@@ -285,13 +339,6 @@ class GraphClient {
     }
   }
 
-  /**
-   * Stream Graph byte content straight to a file, without holding the whole
-   * payload in memory. download-bytes-to-file uses this for big mail attachments
-   * and meeting recordings, where makeRequest's base64 buffering would blow up
-   * memory or hit V8's max string length. Creates the file with wx + 0o600 (never
-   * overwrites) and removes a partial file if the transfer fails.
-   */
   /**
    * Fetch Graph binary content and hand back the undrained response stream.
    *
@@ -453,7 +500,11 @@ class GraphClient {
     // Signoff gate sits at the outbound chokepoint, keyed on method + path, so
     // every route to a message write - tool aliases, PATCH edits and $batch
     // sub-requests alike - passes through it.
-    const body = applyMessageSignoffToRequest(method, endpoint, options.body);
+    const signedBody = applyMessageSignoffToRequest(method, endpoint, options.body);
+    // Graph 400s the whole batch when a write sub-request carries a body with
+    // no Content-Type, so fill it in rather than making every caller remember
+    // it (#677). After the gate, which has to judge the caller's own payload.
+    const body = applyBatchContentType(method, endpoint, signedBody);
 
     const headers: Record<string, string> = {
       Authorization: `Bearer ${accessToken}`,
