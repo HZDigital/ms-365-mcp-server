@@ -36,7 +36,11 @@ import { access } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { TOOL_CATEGORIES } from './tool-categories.js';
-import { getRequestAuditToken, getRequestTokens } from './request-context.js';
+import {
+  getRequestAccessToken,
+  getRequestAuditToken,
+  getRequestTokens,
+} from './request-context.js';
 import { parseTeamsUrl } from './lib/teams-url-parser.js';
 import { buildBM25Index, scoreQuery, tokenize, type BM25Index } from './lib/bm25.js';
 import { deriveTargetResource, type AuditTargetResource } from './audit-target-resource.js';
@@ -983,7 +987,8 @@ async function checkAccountParamInBearerMode(
   authManager?: AuthManager
 ): Promise<string | null> {
   if (!accountParam || !authManager) return null;
-  const contextToken = getRequestAuditToken();
+  // OBO assertions can expose different identity claims than the cached Graph token.
+  const contextToken = await getRequestAccessToken('graph');
   if (!contextToken && !authManager.isOAuthModeEnabled()) return null;
   const bearerToken = contextToken ?? (await authManager.getToken().catch(() => null)) ?? undefined;
   const bearerIdentity = getUserIdentityForAudit(bearerToken);
