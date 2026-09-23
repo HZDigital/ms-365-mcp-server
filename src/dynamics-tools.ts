@@ -162,6 +162,7 @@ function dynamicsTool(
 
 export const DYNAMICS_TOOL_PRESETS = [
   'dynamics-list-tables',
+  'dynamics-get-current-user',
   'dynamics-get-table-metadata',
   'dynamics-query-records',
   'dynamics-get-record',
@@ -204,6 +205,13 @@ export function createDynamicsTools(client: DataverseClient): readonly UtilityTo
             })}`
           )
         )
+    ),
+    dynamicsTool(
+      'dynamics-get-current-user',
+      'GET',
+      "Get the Dataverse UserId for the authenticated caller without searching system users by name. Use this before a Dynamics operation needs the caller's user ID.",
+      () => ({}),
+      async () => textResult(await client.request('/WhoAmI'))
     ),
     dynamicsTool(
       'dynamics-get-table-metadata',

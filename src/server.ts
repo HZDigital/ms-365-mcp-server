@@ -33,7 +33,7 @@ import { createAttachmentHandler } from './attachment-route.js';
 import type { CommandOptions } from './cli.ts';
 import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
-import { requestContext } from './request-context.js';
+import { createValidatedOboRequestContext, requestContext } from './request-context.js';
 import { dumpError } from './crash-logging.js';
 import crypto from 'node:crypto';
 import type { Server as HttpServer } from 'node:http';
@@ -1002,11 +1002,17 @@ class MicrosoftGraphServer {
 
           try {
             if (req.microsoftAuth) {
-              let accessToken = req.microsoftAuth.accessToken;
+              const accessToken = req.microsoftAuth.accessToken;
               if (this.oboClient) {
-                accessToken = await this.oboClient.exchangeToken(accessToken);
+                // Validate before dispatching so invalid assertions cannot invoke
+                // local tools that do not need a downstream resource token.
+                const context = await createValidatedOboRequestContext(accessToken, (resource) =>
+                  this.oboClient!.exchangeToken(accessToken, resource)
+                );
+                await requestContext.run(context, handler);
+              } else {
+                await requestContext.run({ accessToken }, handler);
               }
-              await requestContext.run({ accessToken }, handler);
             } else {
               await handler();
             }

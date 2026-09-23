@@ -11,6 +11,12 @@ describe('buildMcpServerInstructions', () => {
     expect(s).not.toContain('DISCOVERY MODE ADD-ON');
   });
 
+  it('directs Dynamics callers to retrieve their Dataverse UserId without a name lookup', () => {
+    const s = buildMcpServerInstructions({ ...baseCtx, discovery: false });
+    expect(s).toContain('dynamics-get-current-user');
+    expect(s).toContain('without searching by name');
+  });
+
   it('appends discovery addon when discovery is true', () => {
     const s = buildMcpServerInstructions({ ...baseCtx, discovery: true });
     expect(s).toContain('DISCOVERY MODE ADD-ON');
