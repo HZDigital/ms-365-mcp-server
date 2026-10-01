@@ -3,7 +3,6 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import express, { Handler, Request, Response } from 'express';
-import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import logger, { enableConsoleLogging } from './logger.js';
 import { registerAuthTools } from './auth-tools.js';
@@ -27,6 +26,7 @@ import {
 } from './lib/microsoft-auth.js';
 import { isAllowedRedirectUri, parseAllowlist } from './lib/redirect-uri-validation.js';
 import { loadAttachmentUrlConfig, ATTACHMENT_ROUTE } from './lib/attachment-url-config.js';
+import { securityHeaders } from './lib/security-headers.js';
 import { AttachmentTicketStore } from './lib/attachment-tickets.js';
 import { configureAttachmentMinting } from './lib/attachment-minting.js';
 import { createAttachmentHandler } from './attachment-route.js';
@@ -487,15 +487,7 @@ class MicrosoftGraphServer {
         app.set('trust proxy', 1);
       }
 
-      // Security headers. CSP is disabled because this server returns JSON and
-      // OAuth metadata, not HTML; HSTS assumes TLS is terminated upstream.
-      app.use(
-        helmet({
-          contentSecurityPolicy: false,
-          crossOriginEmbedderPolicy: false,
-          hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
-        })
-      );
+      app.use(securityHeaders());
 
       app.use(express.json());
       app.use(express.urlencoded({ extended: true }));
@@ -1091,13 +1083,7 @@ class MicrosoftGraphServer {
         if (dedicated) {
           // Same header policy as the MCP app; there is no reason for the two
           // listeners to disagree about, say, nosniff.
-          attachmentApp.use(
-            helmet({
-              contentSecurityPolicy: false,
-              crossOriginEmbedderPolicy: false,
-              hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
-            })
-          );
+          attachmentApp.use(securityHeaders());
           // `trust proxy` is left at Express's default (off) here, deliberately
           // unlike the MCP app above, and MS365_MCP_TRUST_PROXY_HOPS is not read
           // for it. This listener exists to be dialled directly by a sidecar on
