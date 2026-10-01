@@ -177,6 +177,27 @@ describe('allowed scope HTTP behavior', () => {
     expect(scopes).not.toContain('Calendars.Read');
   });
 
+  it('requests the OBO resource scope in authorize redirects despite allowed scopes', async () => {
+    process.env.MS365_MCP_CLIENT_SECRET = 'secret';
+    clearSecretsCache();
+    await startHttpServer({ allowedScopes: 'Mail.Read', obo: true });
+    const handler = expressMocks.routes.get('/authorize')!;
+    const res = mockResponse();
+
+    await handler(
+      mockRequest(
+        '/authorize?response_type=code&redirect_uri=http://localhost:6274/oauth/callback&scope=Mail.Read&state=abc'
+      ),
+      res
+    );
+
+    const redirectUrl = new URL(res.redirect.mock.calls[0][0]);
+    const scopes = redirectUrl.searchParams.get('scope')!.split(' ');
+    // The resource scope must lead: Entra issues the token for the first resource.
+    expect(scopes[0]).toBe('test-client-id/access_as_user');
+    expect(scopes).not.toContain('Mail.Read');
+  });
+
   it('keeps OBO protected-resource metadata ahead of allowed scopes', async () => {
     process.env.MS365_MCP_CLIENT_SECRET = 'secret';
     clearSecretsCache();

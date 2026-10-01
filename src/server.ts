@@ -784,10 +784,16 @@ class MicrosoftGraphServer {
         //     access to data" consent line that fails in tenants where user
         //     consent for applications is restricted by policy (even when
         //     admin has pre-consented every scope).
+        //
+        // OBO always requests the app's own resource scope, matching what the
+        // discovery docs advertise. Graph scopes here would yield a Graph token,
+        // which the OBO exchange rejects (AADSTS50013) since only Graph can
+        // verify its signature. --allowed-scopes still filters the tool surface.
         const explicitAllowedScopes = parseAllowedScopes(this.options.allowedScopes);
         const clientScope = microsoftAuthUrl.searchParams.get('scope');
-        const baseScopes =
-          explicitAllowedScopes !== undefined
+        const baseScopes = this.options.obo
+          ? [`${clientId}/access_as_user`]
+          : explicitAllowedScopes !== undefined
             ? resolveAuthScopes(this.options)
             : clientScope
               ? clientScope.split(/\s+/).filter(Boolean)
